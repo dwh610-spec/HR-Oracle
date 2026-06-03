@@ -80,7 +80,7 @@ Return a JSON array of batter objects. Each: name, team, bats, lineup_spot, oppo
 
   try {
     const geminiRes = await fetch(
-      https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${GEMINI_KEY}
+     https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${GEMINI_KEY}
 
       {
         method: "POST",
