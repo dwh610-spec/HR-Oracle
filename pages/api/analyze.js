@@ -10,6 +10,18 @@ export default async function handler(req, res) {
   const GEMINI_KEY = process.env.GEMINI_API_KEY;
 
   if (!GEMINI_KEY) return res.status(500).json({ error: "GEMINI_API_KEY not set" });
+  async function callGeminiWithRetry(url, body, retries = 3) {
+  for (let i = 0; i < retries; i++) {
+    const res = await fetch(url, body);
+    const data = await res.json();
+    if (data.error?.status === "RESOURCE_EXHAUSTED") {
+      await new Promise(r => setTimeout(r, 10000 * (i + 1)));
+      continue;
+    }
+    return data;
+  }
+  throw new Error("Gemini quota exceeded after retries");
+}
 
   // Build rich context from live data
   const awayLineup = (gameData?.lineups?.away || []).map(p => {
@@ -78,20 +90,19 @@ Return ONLY a valid JSON array, no other text:
 ]`;
 
   try {
-    const geminiRes = await fetch(
-    `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${GEMINI_KEY}`,
-      {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          contents: [{ parts: [{ text: prompt }] }],
-          generationConfig: { temperature: 0.3, maxOutputTokens: 2048 }
-        })
-      }
-    );
+  const geminiData = await callGeminiWithRetry(
+  `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${GEMINI_KEY}`,
+  {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      contents: [{ parts: [{ text: prompt }] }],
+      generationConfig: { temperature: 0.3, maxOutputTokens: 2048 }
+    })
+  }
+);
 
-    const geminiData = await geminiRes.json();
-
+   
     if (geminiData.error) throw new Error(geminiData.error.message);
 
     const rawText = geminiData.candidates?.[0]?.content?.parts?.[0]?.text || "";
