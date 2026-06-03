@@ -185,16 +185,13 @@ export default function HROracle() {
       if (!fetchedGames.length) throw new Error("No games found for today");
       setGames(fetchedGames);
 
-      // Step 2: For each game fetch live data + analyze
+      // Step 2: For each game fetch live data + analyze (throttled for free tier)
       for (let i = 0; i < fetchedGames.length; i++) {
         const g = fetchedGames[i];
         setStatus(`Analyzing ${g.away_team} @ ${g.home_team} (${i+1}/${fetchedGames.length})…`);
-for (let i = 0; i < fetchedGames.length; i++) {
-        const g = fetchedGames[i];
-        setStatus(`Analyzing ${g.away_team} @ ${g.home_team} (${i+1}/${fetchedGames.length})…`);
-        if (i > 0) await new Promise(r => setTimeout(r, 4500));
 
-        if (i > 0) await new Promise(r => setTimeout(r, 8000));
+        // Throttle: pause between games to stay under Gemini free-tier rate limit
+        if (i > 0) await new Promise(r => setTimeout(r, 4500));
 
         try {
           // Fetch live lineups, stats, weather
