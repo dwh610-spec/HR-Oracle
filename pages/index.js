@@ -189,7 +189,7 @@ export default function HROracle() {
       for (let i = 0; i < fetchedGames.length; i++) {
         const g = fetchedGames[i];
         setStatus(`Analyzing ${g.away_team} @ ${g.home_team} (${i+1}/${fetchedGames.length})…`);
-              for (let i = 0; i < fetchedGames.length; i++) {
+for (let i = 0; i < fetchedGames.length; i++) {
         const g = fetchedGames[i];
         setStatus(`Analyzing ${g.away_team} @ ${g.home_team} (${i+1}/${fetchedGames.length})…`);
         if (i > 0) await new Promise(r => setTimeout(r, 4500));
