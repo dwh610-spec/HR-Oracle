@@ -1,6 +1,9 @@
 // pages/api/analyze.js
 // Uses Google Gemini to analyze HR likelihood from live data
 
+// Extend Vercel function timeout to 60 seconds
+export const config = { maxDuration: 60 };
+
 // Simple in-memory rate limiter
 const lastCallTime = { t: 0 };
 
