@@ -89,20 +89,26 @@ Return ONLY a valid JSON array, no other text:
   }
 ]`;
 
-  try {
-  const geminiData = await callGeminiWithRetry(
-  `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${GEMINI_KEY}`,
-  {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      contents: [{ parts: [{ text: prompt }] }],
-      generationConfig: { temperature: 0.3, maxOutputTokens: 2048 }
-    })
-  }
-);
+try {
+    let geminiData;
+    for (let attempt = 0; attempt < 3; attempt++) {
+      if (attempt > 0) await new Promise(r => setTimeout(r, 15000));
+      const geminiRes = await fetch(
+        `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${GEMINI_KEY}`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            contents: [{ parts: [{ text: prompt }] }],
+            generationConfig: { temperature: 0.3, maxOutputTokens: 2048 }
+          })
+        }
+      );
+      geminiData = await geminiRes.json();
+      if (!geminiData.error) break;
+      if (!geminiData.error.message?.includes("quota")) throw new Error(geminiData.error.message);
+    }
 
-   
     if (geminiData.error) throw new Error(geminiData.error.message);
 
     const rawText = geminiData.candidates?.[0]?.content?.parts?.[0]?.text || "";
