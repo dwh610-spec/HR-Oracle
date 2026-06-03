@@ -1,6 +1,8 @@
 // pages/api/gamedata.js
 // Fetches live lineups + Statcast-style stats for a specific game
 
+export const config = { maxDuration: 60 };
+
 export default async function handler(req, res) {
   res.setHeader("Access-Control-Allow-Origin", "*");
 
