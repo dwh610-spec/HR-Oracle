@@ -1,6 +1,48 @@
 // pages/api/analyze.js
 // Uses Google Gemini to analyze HR likelihood from live data
 
+// Simple in-memory rate limiter
+const lastCallTime = { t: 0 };
+
+async function geminiWithRetry(prompt, apiKey, retries = 3) {
+  for (let attempt = 0; attempt < retries; attempt++) {
+    // Enforce minimum 5 seconds between calls
+    const now = Date.now();
+    const elapsed = now - lastCallTime.t;
+    if (elapsed < 5000) {
+      await new Promise(r => setTimeout(r, 5000 - elapsed + 500));
+    }
+    lastCallTime.t = Date.now();
+
+    const res = await fetch(
+      `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${apiKey}`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          contents: [{ parts: [{ text: prompt }] }],
+          generationConfig: { temperature: 0.3, maxOutputTokens: 2048 }
+        })
+      }
+    );
+
+    const data = await res.json();
+
+    // If rate limited, wait and retry
+    if (data.error?.status === "RESOURCE_EXHAUSTED") {
+      const waitMs = (attempt + 1) * 10000;
+      console.log(`Rate limited, waiting ${waitMs}ms before retry ${attempt + 1}`);
+      await new Promise(r => setTimeout(r, waitMs));
+      continue;
+    }
+
+    if (data.error) throw new Error(data.error.message);
+
+    return data;
+  }
+  throw new Error("Gemini rate limit exceeded after retries");
+}
+
 export default async function handler(req, res) {
   res.setHeader("Access-Control-Allow-Origin", "*");
 
@@ -10,43 +52,30 @@ export default async function handler(req, res) {
   const GEMINI_KEY = process.env.GEMINI_API_KEY;
 
   if (!GEMINI_KEY) return res.status(500).json({ error: "GEMINI_API_KEY not set" });
-  async function callGeminiWithRetry(url, body, retries = 3) {
-  for (let i = 0; i < retries; i++) {
-    const res = await fetch(url, body);
-    const data = await res.json();
-    if (data.error?.status === "RESOURCE_EXHAUSTED") {
-      await new Promise(r => setTimeout(r, 10000 * (i + 1)));
-      continue;
-    }
-    return data;
-  }
-  throw new Error("Gemini quota exceeded after retries");
-}
 
-  // Build rich context from live data
   const awayLineup = (gameData?.lineups?.away || []).map(p => {
     const s = gameData?.playerStats?.[p.id] || {};
-    return `${p.lineup_spot}. ${p.name} (${p.bats}HB) — AVG ${s.avg||"?"}, HR ${s.hr||"?"}, OPS ${s.ops||"?"}, SLG ${s.slg||"?"}`;
+    return `${p.lineup_spot}. ${p.name} (${p.bats}HB) - AVG ${s.avg||"?"}, HR ${s.hr||"?"}, OPS ${s.ops||"?"}, SLG ${s.slg||"?"}`;
   }).join("\n") || "Lineup not yet available";
 
   const homeLineup = (gameData?.lineups?.home || []).map(p => {
     const s = gameData?.playerStats?.[p.id] || {};
-    return `${p.lineup_spot}. ${p.name} (${p.bats}HB) — AVG ${s.avg||"?"}, HR ${s.hr||"?"}, OPS ${s.ops||"?"}, SLG ${s.slg||"?"}`;
+    return `${p.lineup_spot}. ${p.name} (${p.bats}HB) - AVG ${s.avg||"?"}, HR ${s.hr||"?"}, OPS ${s.ops||"?"}, SLG ${s.slg||"?"}`;
   }).join("\n") || "Lineup not yet available";
 
   const awayPStats = gameData?.pitcherStats?.away || {};
   const homePStats = gameData?.pitcherStats?.home || {};
   const weather = gameData?.weather || {};
 
-  const prompt = `You are an elite MLB sabermetrics analyst. Analyze this game for home run likelihood using the live 2026 season data provided.
+  const prompt = `You are an elite MLB sabermetrics analyst. Analyze this game for home run likelihood.
 
-GAME: ${game.away_team} @ ${game.home_team} at ${game.venue} — ${game.time_et} ET
+GAME: ${game.away_team} @ ${game.home_team} at ${game.venue} - ${game.time_et} ET
 
 AWAY STARTER: ${game.away_sp.name} (${game.away_sp.throws}HP)
-2026 Stats: ERA ${awayPStats.era||game.away_sp.era}, WHIP ${awayPStats.whip||"N/A"}, HR/9 ${awayPStats.hr9||"N/A"}, K/9 ${awayPStats.kPer9||"N/A"}, HR allowed ${awayPStats.hr_allowed||"N/A"}
+2026 Stats: ERA ${awayPStats.era||game.away_sp.era}, WHIP ${awayPStats.whip||"N/A"}, HR/9 ${awayPStats.hr9||"N/A"}, HR allowed ${awayPStats.hr_allowed||"N/A"}
 
 HOME STARTER: ${game.home_sp.name} (${game.home_sp.throws}HP)
-2026 Stats: ERA ${homePStats.era||game.home_sp.era}, WHIP ${homePStats.whip||"N/A"}, HR/9 ${homePStats.hr9||"N/A"}, K/9 ${homePStats.kPer9||"N/A"}, HR allowed ${homePStats.hr_allowed||"N/A"}
+2026 Stats: ERA ${homePStats.era||game.home_sp.era}, WHIP ${homePStats.whip||"N/A"}, HR/9 ${homePStats.hr9||"N/A"}, HR allowed ${homePStats.hr_allowed||"N/A"}
 
 AWAY LINEUP (faces home starter ${game.home_sp.name}):
 ${awayLineup}
@@ -54,23 +83,15 @@ ${awayLineup}
 HOME LINEUP (faces away starter ${game.away_sp.name}):
 ${homeLineup}
 
-WEATHER AT ${game.venue}: ${weather.summary || "Unknown"}
-Wind: ${weather.wind_speed || "Unknown"} from ${weather.wind_dir || "unknown"} degrees
+WEATHER: ${weather.summary || "Unknown"}, Wind: ${weather.wind_speed || "Unknown"}
 
-PARK FACTORS: Use your knowledge of ${game.venue} dimensions, HR park factor, and how it plays for left vs right-handed hitters.
+Identify top 4-5 HR candidates from EACH team. Weight: HR pace, OPS/SLG, platoon advantage, park factors at ${game.venue}, weather.
 
-ANALYSIS INSTRUCTIONS:
-- Identify top 4-5 HR candidates from EACH team
-- Away batters face HOME starter; home batters face AWAY starter
-- Weight heavily: HR pace (most important), OPS/SLG, platoon advantage vs pitcher handedness, park factors, weather (wind direction matters a lot — tailwind helps, headwind hurts)
-- pitcher_grade: "BATTING PRACTICE" if ERA>4.5 or HR/9>1.3, "STUD" if ERA<3.0 and HR/9<0.8, otherwise "AVERAGE"
-- batter_grade: "FIRE" if top 5% HR pace + favorable matchup, "HOT" if above average, "COLD" if poor matchup or slumping, otherwise "AVERAGE"
-
-Return ONLY a valid JSON array, no other text:
+Return ONLY a JSON array starting with [:
 [
   {
     "name": "Player Name",
-    "team": "TEAM_ABB",
+    "team": "TEAM",
     "bats": "L",
     "lineup_spot": 3,
     "opposing_sp": "Pitcher Name",
@@ -85,35 +106,18 @@ Return ONLY a valid JSON array, no other text:
       { "label": "OPS", "value": ".952" },
       { "label": "Pitcher HR/9", "value": "1.4" }
     ],
-    "summary": "One sentence explaining why this is a good or bad HR play today."
+    "summary": "One sentence explaining this HR play."
   }
-]`;
+]
+pitcher_grade: BATTING PRACTICE, AVERAGE, or STUD only
+batter_grade: FIRE, HOT, AVERAGE, or COLD only
+hr_score: integer 1-100
+Output ONLY the JSON array.`;
 
-try {
-    let geminiData;
-    for (let attempt = 0; attempt < 3; attempt++) {
-      if (attempt > 0) await new Promise(r => setTimeout(r, 15000));
-      const geminiRes = await fetch(
-        `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${GEMINI_KEY}`,
-        {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            contents: [{ parts: [{ text: prompt }] }],
-            generationConfig: { temperature: 0.3, maxOutputTokens: 2048 }
-          })
-        }
-      );
-      geminiData = await geminiRes.json();
-      if (!geminiData.error) break;
-      if (!geminiData.error.message?.includes("quota")) throw new Error(geminiData.error.message);
-    }
-
-    if (geminiData.error) throw new Error(geminiData.error.message);
-
+  try {
+    const geminiData = await geminiWithRetry(prompt, GEMINI_KEY);
     const rawText = geminiData.candidates?.[0]?.content?.parts?.[0]?.text || "";
 
-    // Parse JSON from response
     const t = rawText.trim();
     let parsed;
     const a1 = t.indexOf("["), a2 = t.lastIndexOf("]");
