@@ -73,6 +73,7 @@ export default async function handler(req, res) {
           home_team_full: home?.team?.name || "",
           time_et: gameTime,
           venue,
+          venue_id: game.venue?.id || null,
           status: game.status?.detailedState || "",
           away_sp: {
             id: awayPitcher?.id || null,
