@@ -17,6 +17,31 @@ async function fetchWithTimeout(url, ms = 4000) {
   }
 }
 
+// Fetch a pitcher's pitch arsenal (pitch types, usage %, velocity) from MLB Stats API
+async function fetchArsenal(pitcherId) {
+  if (!pitcherId || pitcherId === "null" || pitcherId === "") return null;
+  // pitchArsenal stat type returns per-pitch-type usage and average speed
+  const data = await fetchWithTimeout(
+    `https://statsapi.mlb.com/api/v1/people/${pitcherId}?hydrate=stats(group=pitching,type=pitchArsenal,season=2026)`,
+    3500
+  );
+  const splits = data?.people?.[0]?.stats?.[0]?.splits || [];
+  if (!splits.length) return null;
+  const pitches = splits.map(sp => {
+    const st = sp.stat || {};
+    return {
+      type: sp.pitchType?.description || sp.pitchType?.code || "Unknown",
+      code: sp.pitchType?.code || "",
+      count: st.count || st.totalPitches || 0,
+      avgSpeed: st.averageSpeed ? Math.round(st.averageSpeed * 10) / 10 : null,
+      usage: st.percentage != null ? Math.round(st.percentage * 1000) / 10 : null
+    };
+  }).filter(p => p.type !== "Unknown");
+  // Sort by usage/count descending
+  pitches.sort((a, b) => (b.usage || b.count || 0) - (a.usage || a.count || 0));
+  return pitches.length ? pitches : null;
+}
+
 // Get current active roster for a team — reads official IL status codes
 async function fetchRoster(teamId) {
   if (!teamId) return [];
@@ -132,14 +157,15 @@ export default async function handler(req, res) {
       if (!seasonStat || (seasonStat.atBats || 0) === 0) p._inactive = true;
     });
 
-    // ── 4. Pitcher stats in parallel ──────────────────────────────────
+    // ── 4. Pitcher stats + arsenal in parallel ────────────────────────
+    results.arsenal = {};
     const pitcherPromises = [["away", away_sp_id], ["home", home_sp_id]].map(async ([key, pid]) => {
       if (!pid || pid === "null" || pid === "") return;
-      const data = await fetchWithTimeout(
-        `https://statsapi.mlb.com/api/v1/people/${pid}?hydrate=stats(group=pitching,type=season,season=2026)`,
-        3000
-      );
-      const stat = data?.people?.[0]?.stats?.[0]?.splits?.[0]?.stat;
+      const [statData, arsenal] = await Promise.all([
+        fetchWithTimeout(`https://statsapi.mlb.com/api/v1/people/${pid}?hydrate=stats(group=pitching,type=season,season=2026)`, 3000),
+        fetchArsenal(pid)
+      ]);
+      const stat = statData?.people?.[0]?.stats?.[0]?.splits?.[0]?.stat;
       if (stat) {
         results.pitcherStats[key] = {
           era: stat.era || "N/A",
@@ -148,6 +174,7 @@ export default async function handler(req, res) {
           hr_allowed: stat.homeRuns || 0
         };
       }
+      if (arsenal) results.arsenal[key] = arsenal;
     });
 
     // ── 5. Weather in parallel ────────────────────────────────────────
