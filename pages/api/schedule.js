@@ -57,6 +57,8 @@ export default async function handler(req, res) {
         games.push({
           game_id: `${away?.team?.abbreviation}_${home?.team?.abbreviation}`,
           game_pk: game.gamePk,
+          away_team_id: away?.team?.id || null,
+          home_team_id: home?.team?.id || null,
           away_team: away?.team?.abbreviation || "???",
           home_team: home?.team?.abbreviation || "???",
           away_team_full: away?.team?.name || "",
