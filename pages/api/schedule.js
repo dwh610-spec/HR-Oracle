@@ -15,12 +15,7 @@ export default async function handler(req, res) {
 
     const games = [];
 
-    for (const date of mlbData.dates || []) {
-      for (const game of date.games || []) {
-        const away = game.teams?.away;
-        const home = game.teams?.home;
-        const venue = game.venue?.name || "Unknown Venue";
-        for (const date of mlbData.dates || []) {
+   for (const date of mlbData.dates || []) {
       for (const game of date.games || []) {
         const away = game.teams?.away;
         const home = game.teams?.home;
