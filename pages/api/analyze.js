@@ -40,6 +40,19 @@ export default async function handler(req, res) {
     return `${p.lineup_spot}. ${p.name} (${p.bats}HB) — AVG ${s.avg||"?"}, HR ${s.hr||"?"}, OPS ${s.ops||"?"}, SLG ${s.slg||"?"}`;
   }).join("\n") || "Lineup not yet posted — use your knowledge of this team's regulars";
 
+  // Format pitcher arsenals (pitch mix, velocity, usage)
+  const fmtArsenal = (arr) => {
+    if (!arr || !arr.length) return "Arsenal data not available";
+    return arr.map(p => {
+      const parts = [p.type];
+      if (p.usage != null) parts.push(p.usage + "%");
+      if (p.avgSpeed != null) parts.push(p.avgSpeed + " mph");
+      return parts.join(" ");
+    }).join(", ");
+  };
+  const awayArsenal = fmtArsenal(gameData?.arsenal?.away);
+  const homeArsenal = fmtArsenal(gameData?.arsenal?.home);
+
   const aP = gameData?.pitcherStats?.away || {};
   const hP = gameData?.pitcherStats?.home || {};
   const weather = gameData?.weather || {};
@@ -49,7 +62,9 @@ export default async function handler(req, res) {
 GAME: ${game.away_team} @ ${game.home_team} at ${game.venue} — ${game.time_et} ET
 
 AWAY STARTER: ${game.away_sp.name} (${game.away_sp.throws}HP) — ERA ${aP.era||game.away_sp.era}, WHIP ${aP.whip||"N/A"}, HR/9 ${aP.hr9||"N/A"}, HR allowed ${aP.hr_allowed||"N/A"}
+  Arsenal: ${awayArsenal}
 HOME STARTER: ${game.home_sp.name} (${game.home_sp.throws}HP) — ERA ${hP.era||game.home_sp.era}, WHIP ${hP.whip||"N/A"}, HR/9 ${hP.hr9||"N/A"}, HR allowed ${hP.hr_allowed||"N/A"}
+  Arsenal: ${homeArsenal}
 
 AWAY LINEUP (faces ${game.home_sp.name}):
 ${awayLineup}
@@ -59,7 +74,9 @@ ${homeLineup}
 
 WEATHER: ${weather.summary || "typical conditions"}, wind from ${weather.wind_dir || "?"} degrees
 
-Identify the top 4-5 HR candidates from EACH team. Weight: HR pace, SLG/OPS, platoon advantage vs pitcher hand, park factors at ${game.venue}, weather. Away batters face home starter; home batters face away starter.
+Identify the top 4-5 HR candidates from EACH team. Weight: HR pace, SLG/OPS, platoon advantage vs pitcher hand, park factors at ${game.venue}, weather, AND the pitcher's arsenal. For arsenal: a pitcher who throws mostly fastballs in the zone is more HR-prone; high-velocity power pitchers with heavy breaking-ball usage suppress HRs; consider whether each hitter's power profile matches up well against the specific pitch mix that pitcher throws. Away batters face home starter; home batters face away starter.
+
+When a batter's power profile is a strong match against the pitcher's primary pitch types, note it in the summary (e.g. "crushes fastballs, and SP throws 60% four-seam").
 
 Grading:
 - pitcher_grade: "BATTING PRACTICE" (ERA>4.5 or HR/9>1.3), "STUD" (ERA<3.0 and HR/9<0.8), else "AVERAGE"
