@@ -114,8 +114,8 @@ let geminiData = await geminiRes.json();
     }
 
     if (geminiData.error) {
-      throw new Error(JSON.stringify(geminiData.error).substring(0, 200));
-    }
+      throw new Error(JSON.stringify(geminiData.error).substring(0, 200));}
+  
       const retryDelay = geminiData.error.details?.find(d => d["@type"]?.includes("RetryInfo"))?.retryDelay;
       const waitMs = retryDelay ? parseInt(retryDelay) * 1000 : 20000;
       await new Promise(r => setTimeout(r, Math.min(waitMs, 25000)));
