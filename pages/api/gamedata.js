@@ -282,9 +282,13 @@ export default async function handler(req, res) {
 
     await Promise.all([...statPromises, ...pitcherPromises, weatherPromise]);
 
-    // ── 6. Drop inactive/injured players ──────────────────────────────
+    // ── 6. Drop inactive/injured players, then cap to top 6 HR threats ─
     for (const side of ["away", "home"]) {
-      results.lineups[side] = results.lineups[side].filter(p => !p._inactive);
+      results.lineups[side] = results.lineups[side]
+        .filter(p => !p._inactive)
+        .sort((a, b) => (results.playerStats[b.id]?.hr || 0) - (results.playerStats[a.id]?.hr || 0))
+        .slice(0, 6)
+        .map((p, idx) => ({ ...p, lineup_spot: p.lineup_spot || idx + 1 }));
     }
 
     // For roster-based lineups, keep only the top 9 HR threats with stats
@@ -293,7 +297,7 @@ export default async function handler(req, res) {
         results.lineups[side] = results.lineups[side]
           .filter(p => results.playerStats[p.id])
           .sort((a, b) => (results.playerStats[b.id]?.hr || 0) - (results.playerStats[a.id]?.hr || 0))
-          .slice(0, 9)
+          .slice(0, 6)
           .map((p, idx) => ({ ...p, lineup_spot: idx + 1 }));
       }
     }
