@@ -160,10 +160,9 @@ Return ONLY a JSON object with a single key "batters" whose value is an array of
 
     const rawText = data.choices?.[0]?.message?.content || "";
     if (!rawText) {
-      // Surface finish reason / any message so we can see WHY it was empty
-      const fr = data.choices?.[0]?.finish_reason || "unknown";
-      const dbg = JSON.stringify(data).substring(0, 250);
-      throw new Error(`Empty response (finish: ${fr}) ${dbg}`);
+      // Surface the FULL error message so we can diagnose
+      const msg = data.error?.message || data.message || JSON.stringify(data);
+      throw new Error("CEREBRAS: " + String(msg).substring(0, 400));
     }
 
     const parsed = parseArray(rawText);
