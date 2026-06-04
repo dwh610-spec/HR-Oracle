@@ -98,8 +98,24 @@ Return a JSON array of batter objects. Each: name, team, bats, lineup_spot, oppo
 
 let geminiData = await geminiRes.json();
 
-    // If rate-limited, wait and retry once
-    if (geminiData.error && /quota|rate|429|exceeded/i.test(geminiData.error.message || "")) {
+    // Retry on rate limit (429) up to 3 times with increasing waits
+    let retries = 0;
+    while (geminiData.error && /429|quota|rate|exceeded/i.test(JSON.stringify(geminiData.error)) && retries < 3) {
+      retries++;
+      await new Promise(r => setTimeout(r, 8000 * retries)); // 8s, 16s, 24s
+      const retryRes = await fetch(
+        `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${GEMINI_KEY}`,
+        { method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify({
+          contents: [{ parts: [{ text: prompt }] }],
+          generationConfig: { temperature: 0.3, maxOutputTokens: 2048 }
+        })}
+      );
+      geminiData = await retryRes.json();
+    }
+
+    if (geminiData.error) {
+      throw new Error(JSON.stringify(geminiData.error).substring(0, 200));
+    }
       const retryDelay = geminiData.error.details?.find(d => d["@type"]?.includes("RetryInfo"))?.retryDelay;
       const waitMs = retryDelay ? parseInt(retryDelay) * 1000 : 20000;
       await new Promise(r => setTimeout(r, Math.min(waitMs, 25000)));
