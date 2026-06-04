@@ -30,15 +30,20 @@ export default async function handler(req, res) {
   const GROQ_KEY = process.env.GROQ_API_KEY;
   if (!GROQ_KEY) return res.status(500).json({ error: "GROQ_API_KEY not set" });
 
-  const awayLineup = (gameData?.lineups?.away || []).map(p => {
+  const fmtBatter = (p) => {
     const s = gameData?.playerStats?.[p.id] || {};
-    return `${p.lineup_spot}. ${p.name} (${p.bats}HB) — AVG ${s.avg||"?"}, HR ${s.hr||"?"}, OPS ${s.ops||"?"}, SLG ${s.slg||"?"}`;
-  }).join("\n") || "Lineup not yet posted — use your knowledge of this team's regulars";
-
-  const homeLineup = (gameData?.lineups?.home || []).map(p => {
-    const s = gameData?.playerStats?.[p.id] || {};
-    return `${p.lineup_spot}. ${p.name} (${p.bats}HB) — AVG ${s.avg||"?"}, HR ${s.hr||"?"}, OPS ${s.ops||"?"}, SLG ${s.slg||"?"}`;
-  }).join("\n") || "Lineup not yet posted — use your knowledge of this team's regulars";
+    let line = `${p.lineup_spot}. ${p.name} (${p.bats}HB) — AVG ${s.avg||"?"}, HR ${s.hr||"?"}, OPS ${s.ops||"?"}, SLG ${s.slg||"?"}`;
+    if (s.iso) line += `, ISO ${s.iso}`;
+    if (s.venueHistory) {
+      const v = s.venueHistory;
+      line += ` | Career at THIS park: ${v.hr} HR in ${v.ab} AB, ${v.slg} SLG`;
+    }
+    return line;
+  };
+  const awayLineup = (gameData?.lineups?.away || []).map(fmtBatter).join("\n")
+    || "Lineup not yet posted — use your knowledge of this team's regulars";
+  const homeLineup = (gameData?.lineups?.home || []).map(fmtBatter).join("\n")
+    || "Lineup not yet posted — use your knowledge of this team's regulars";
 
   // Format pitcher arsenals (pitch mix, velocity, usage)
   const fmtArsenal = (arr) => {
@@ -77,6 +82,11 @@ WEATHER: ${weather.summary || "typical conditions"}, wind from ${weather.wind_di
 Identify the top 4-5 HR candidates from EACH team. Weight: HR pace, SLG/OPS, platoon advantage vs pitcher hand, park factors at ${game.venue}, weather, AND the pitcher's arsenal. For arsenal: a pitcher who throws mostly fastballs in the zone is more HR-prone; high-velocity power pitchers with heavy breaking-ball usage suppress HRs; consider whether each hitter's power profile matches up well against the specific pitch mix that pitcher throws. Away batters face home starter; home batters face away starter.
 
 When a batter's power profile is a strong match against the pitcher's primary pitch types, note it in the summary (e.g. "crushes fastballs, and SP throws 60% four-seam").
+
+IMPORTANT additional factors to weigh heavily:
+- CAREER AT THIS PARK: If a batter has strong career numbers at this specific ballpark (high HR/AB rate, high SLG), boost their score notably — research shows park-specific history is the single strongest HR predictor. Call it out in the summary (e.g. "owns a .610 SLG with 9 career HR at this park").
+- ISO (isolated power = SLG minus AVG): higher ISO means more raw power independent of batting average; weight ISO over batting average for HR likelihood.
+- Treat exit-velocity/quality-of-contact and power metrics as more predictive than recent batting average, which is noisier.
 
 Grading:
 - pitcher_grade: "BATTING PRACTICE" (ERA>4.5 or HR/9>1.3), "STUD" (ERA<3.0 and HR/9<0.8), else "AVERAGE"
