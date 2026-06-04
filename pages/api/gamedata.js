@@ -1,9 +1,8 @@
 // pages/api/gamedata.js
-// Fetches live lineups + stats — optimized for speed (parallel, timeout-safe)
+// Fetches live lineups (or current active roster as fallback) + stats + weather
 
 export const config = { maxDuration: 30 };
 
-// Helper: fetch with timeout so one slow call can't kill everything
 async function fetchWithTimeout(url, ms = 4000) {
   const controller = new AbortController();
   const id = setTimeout(() => controller.abort(), ms);
@@ -17,14 +16,35 @@ async function fetchWithTimeout(url, ms = 4000) {
   }
 }
 
+// Get current active roster for a team (always up to date)
+async function fetchRoster(teamId) {
+  if (!teamId) return [];
+  const data = await fetchWithTimeout(
+    `https://statsapi.mlb.com/api/v1/teams/${teamId}/roster?rosterType=active`,
+    4000
+  );
+  const roster = data?.roster || [];
+  // Only position players (exclude pitchers from HR analysis)
+  return roster
+    .filter(r => r.position?.abbreviation !== "P")
+    .map((r, idx) => ({
+      id: r.person?.id,
+      name: r.person?.fullName || "Unknown",
+      position: r.position?.abbreviation || "",
+      lineup_spot: idx + 1,
+      bats: "R" // will be refined by stats lookup
+    }));
+}
+
 export default async function handler(req, res) {
   res.setHeader("Access-Control-Allow-Origin", "*");
-  const { game_pk, venue, away_sp_id, home_sp_id } = req.query;
+  const { game_pk, venue, away_sp_id, home_sp_id, away_team_id, home_team_id } = req.query;
 
-  const results = { lineups: { away: [], home: [] }, pitcherStats: {}, playerStats: {}, weather: null };
+  const results = { lineups: { away: [], home: [] }, pitcherStats: {}, playerStats: {}, weather: null, source: "lineup" };
 
   try {
-    // ── 1. Lineups from boxscore (single call) ────────────────────────
+    // ── 1. Try live lineup from boxscore ──────────────────────────────
+    let hasLineup = false;
     if (game_pk) {
       const box = await fetchWithTimeout(`https://statsapi.mlb.com/api/v1/game/${game_pk}/boxscore`, 4000);
       if (box?.teams) {
@@ -32,40 +52,59 @@ export default async function handler(req, res) {
           const teamData = box.teams[side];
           const order = teamData?.battingOrder || [];
           const players = teamData?.players || {};
-          results.lineups[side] = order.map((id, idx) => {
-            const p = players[`ID${id}`];
-            return p ? {
-              id,
-              name: p.person?.fullName || "Unknown",
-              position: p.position?.abbreviation || "",
-              lineup_spot: idx + 1,
-              bats: p.person?.batSide?.code || "R"
-            } : null;
-          }).filter(Boolean);
+          if (order.length > 0) {
+            hasLineup = true;
+            results.lineups[side] = order.map((id, idx) => {
+              const p = players[`ID${id}`];
+              return p ? {
+                id,
+                name: p.person?.fullName || "Unknown",
+                position: p.position?.abbreviation || "",
+                lineup_spot: idx + 1,
+                bats: p.person?.batSide?.code || "R"
+              } : null;
+            }).filter(Boolean);
+          }
         }
       }
     }
 
-    // ── 2. Batter stats — ALL IN PARALLEL (was the bottleneck) ────────
+    // ── 2. Fallback: current active rosters (if no lineup posted yet) ─
+    if (!hasLineup) {
+      results.source = "roster";
+      const [awayRoster, homeRoster] = await Promise.all([
+        fetchRoster(away_team_id),
+        fetchRoster(home_team_id)
+      ]);
+      results.lineups.away = awayRoster;
+      results.lineups.home = homeRoster;
+    }
+
+    // ── 3. Batter stats in parallel ───────────────────────────────────
     const allPlayers = [...results.lineups.away, ...results.lineups.home];
     const statPromises = allPlayers.map(async (p) => {
+      if (!p.id) return;
       const data = await fetchWithTimeout(
         `https://statsapi.mlb.com/api/v1/people/${p.id}?hydrate=stats(group=hitting,type=season,season=2026)`,
         3000
       );
-      const stat = data?.people?.[0]?.stats?.[0]?.splits?.[0]?.stat;
+      const person = data?.people?.[0];
+      const stat = person?.stats?.[0]?.splits?.[0]?.stat;
+      // Update batting hand from the person record
+      if (person?.batSide?.code) p.bats = person.batSide.code;
       if (stat) {
         results.playerStats[p.id] = {
           avg: stat.avg || ".000",
           ops: stat.ops || ".000",
           hr: stat.homeRuns || 0,
           slg: stat.slg || ".000",
-          obp: stat.obp || ".000"
+          obp: stat.obp || ".000",
+          ab: stat.atBats || 0
         };
       }
     });
 
-    // ── 3. Pitcher stats in parallel ──────────────────────────────────
+    // ── 4. Pitcher stats in parallel ──────────────────────────────────
     const pitcherPromises = [["away", away_sp_id], ["home", home_sp_id]].map(async ([key, pid]) => {
       if (!pid || pid === "null" || pid === "") return;
       const data = await fetchWithTimeout(
@@ -83,7 +122,7 @@ export default async function handler(req, res) {
       }
     });
 
-    // ── 4. Weather in parallel ────────────────────────────────────────
+    // ── 5. Weather in parallel ────────────────────────────────────────
     const venueCoords = {
       "Fenway Park":[42.3467,-71.0972],"Yankee Stadium":[40.8296,-73.9262],"Citi Field":[40.7571,-73.8458],
       "Citizens Bank Park":[39.9061,-75.1665],"Wrigley Field":[41.9484,-87.6553],"Rate Field":[41.8300,-87.6338],
@@ -119,12 +158,21 @@ export default async function handler(req, res) {
       }
     })();
 
-    // Wait for everything in parallel — much faster than sequential
     await Promise.all([...statPromises, ...pitcherPromises, weatherPromise]);
+
+    // Trim roster-based lineups to top HR threats (players with most HRs) to keep prompt focused
+    if (results.source === "roster") {
+      for (const side of ["away", "home"]) {
+        results.lineups[side] = results.lineups[side]
+          .filter(p => results.playerStats[p.id]) // only players with 2026 stats (active, playing)
+          .sort((a, b) => (results.playerStats[b.id]?.hr || 0) - (results.playerStats[a.id]?.hr || 0))
+          .slice(0, 9)
+          .map((p, idx) => ({ ...p, lineup_spot: idx + 1 }));
+      }
+    }
 
     return res.status(200).json(results);
   } catch (e) {
-    // Return partial data rather than failing entirely
     return res.status(200).json(results);
   }
 }
