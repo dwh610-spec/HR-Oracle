@@ -120,7 +120,7 @@ Return ONLY a JSON object with a single key "batters" whose value is an array of
       { role: "user", content: prompt }
     ],
     temperature: 0.3,
-    max_tokens: 3000,
+    max_tokens: 2000,
     response_format: { type: "json_object" }
   };
 
@@ -152,10 +152,15 @@ Return ONLY a JSON object with a single key "batters" whose value is an array of
     }
 
     const rawText = data.choices?.[0]?.message?.content || "";
-    if (!rawText) throw new Error("Empty Cerebras response");
+    if (!rawText) {
+      // Surface finish reason / any message so we can see WHY it was empty
+      const fr = data.choices?.[0]?.finish_reason || "unknown";
+      const dbg = JSON.stringify(data).substring(0, 250);
+      throw new Error(`Empty response (finish: ${fr}) ${dbg}`);
+    }
 
     const parsed = parseArray(rawText);
-    if (!parsed) throw new Error("Could not parse JSON from response");
+    if (!parsed) throw new Error("Parse fail: " + rawText.substring(0, 150));
 
     return res.status(200).json({ candidates: parsed });
   } catch (e) {
