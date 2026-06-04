@@ -1,14 +1,20 @@
 // pages/api/analyze.js
-// Uses Google Gemini (2.0 Flash) to analyze HR likelihood, with rate-limit retries
+// Uses Groq (Llama 3.3 70B) to analyze HR likelihood — high free-tier limits
 
 export const config = { maxDuration: 60 };
 
-const MODEL_URL = (key) =>
-  `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${key}`;
+const GROQ_URL = "https://api.groq.com/openai/v1/chat/completions";
 
 function parseArray(rawText) {
   if (!rawText) return null;
   try { const p = JSON.parse(rawText); if (Array.isArray(p)) return p; } catch {}
+  // Sometimes wrapped in an object like { "candidates": [...] } or { "batters": [...] }
+  try {
+    const obj = JSON.parse(rawText);
+    for (const k of Object.keys(obj)) {
+      if (Array.isArray(obj[k])) return obj[k];
+    }
+  } catch {}
   const a1 = rawText.indexOf("["), a2 = rawText.lastIndexOf("]");
   if (a1 !== -1 && a2 > a1) {
     try { const p = JSON.parse(rawText.slice(a1, a2 + 1)); if (Array.isArray(p)) return p; } catch {}
@@ -21,8 +27,8 @@ export default async function handler(req, res) {
   if (req.method !== "POST") return res.status(405).json({ error: "POST only" });
 
   const { game, gameData } = req.body;
-  const GEMINI_KEY = process.env.GEMINI_API_KEY;
-  if (!GEMINI_KEY) return res.status(500).json({ error: "GEMINI_API_KEY not set" });
+  const GROQ_KEY = process.env.GROQ_API_KEY;
+  if (!GROQ_KEY) return res.status(500).json({ error: "GROQ_API_KEY not set" });
 
   const awayLineup = (gameData?.lineups?.away || []).map(p => {
     const s = gameData?.playerStats?.[p.id] || {};
@@ -59,7 +65,7 @@ Grading:
 - pitcher_grade: "BATTING PRACTICE" (ERA>4.5 or HR/9>1.3), "STUD" (ERA<3.0 and HR/9<0.8), else "AVERAGE"
 - batter_grade: "FIRE" (elite HR pace + great matchup), "HOT" (above avg), "COLD" (poor/slumping), else "AVERAGE"
 
-Return ONLY a valid JSON array (no markdown, no extra text) of batter objects. Each object has exactly these fields:
+Return ONLY a JSON object with a single key "batters" whose value is an array of batter objects. Each batter object has exactly these fields:
 {
   "name": "Player Name",
   "team": "${game.away_team} or ${game.home_team}",
@@ -78,44 +84,51 @@ Return ONLY a valid JSON array (no markdown, no extra text) of batter objects. E
     { "label": "vs RHP", "value": ".291" }
   ],
   "summary": "One sentence explanation."
-}
-
-Start your response with [ and end with ]. No other text.`;
+}`;
 
   const requestBody = {
-    contents: [{ parts: [{ text: prompt }] }],
-    generationConfig: { temperature: 0.3, maxOutputTokens: 2048 }
+    model: "llama-3.3-70b-versatile",
+    messages: [
+      { role: "system", content: "You are an elite MLB sabermetrics analyst. You always respond with valid JSON only." },
+      { role: "user", content: prompt }
+    ],
+    temperature: 0.3,
+    max_tokens: 3000,
+    response_format: { type: "json_object" }
   };
 
-  async function callGemini() {
-    const r = await fetch(MODEL_URL(GEMINI_KEY), {
+  async function callGroq() {
+    const r = await fetch(GROQ_URL, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: {
+        "Content-Type": "application/json",
+        "Authorization": `Bearer ${GROQ_KEY}`
+      },
       body: JSON.stringify(requestBody)
     });
     return r.json();
   }
 
   try {
-    let data = await callGemini();
+    let data = await callGroq();
 
-    // Retry on 429 / rate-limit up to 3 times with increasing backoff
+    // Retry on rate limit up to 2 times
     let retries = 0;
-    while (data.error && /429|quota|rate|exceeded/i.test(JSON.stringify(data.error)) && retries < 3) {
+    while (data.error && /rate|429|limit/i.test(JSON.stringify(data.error)) && retries < 2) {
       retries++;
-      await new Promise(r => setTimeout(r, 8000 * retries)); // 8s, 16s, 24s
-      data = await callGemini();
+      await new Promise(r => setTimeout(r, 5000 * retries));
+      data = await callGroq();
     }
 
     if (data.error) {
       throw new Error(JSON.stringify(data.error).substring(0, 200));
     }
 
-    const rawText = data.candidates?.[0]?.content?.parts?.[0]?.text || "";
-    if (!rawText) throw new Error("Empty Gemini response");
+    const rawText = data.choices?.[0]?.message?.content || "";
+    if (!rawText) throw new Error("Empty Groq response");
 
     const parsed = parseArray(rawText);
-    if (!parsed) throw new Error("Could not parse JSON array from response");
+    if (!parsed) throw new Error("Could not parse JSON from response");
 
     return res.status(200).json({ candidates: parsed });
   } catch (e) {
