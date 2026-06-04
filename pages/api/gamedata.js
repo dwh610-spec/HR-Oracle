@@ -1,5 +1,6 @@
 // pages/api/gamedata.js
 // Fetches live lineups (or current active roster as fallback) + stats + weather
+// Filters out injured/inactive players (no game in last 10 days)
 
 export const config = { maxDuration: 30 };
 
@@ -16,7 +17,7 @@ async function fetchWithTimeout(url, ms = 4000) {
   }
 }
 
-// Get current active roster for a team (always up to date)
+// Get current active roster for a team
 async function fetchRoster(teamId) {
   if (!teamId) return [];
   const data = await fetchWithTimeout(
@@ -24,7 +25,6 @@ async function fetchRoster(teamId) {
     4000
   );
   const roster = data?.roster || [];
-  // Only position players (exclude pitchers from HR analysis)
   return roster
     .filter(r => r.position?.abbreviation !== "P")
     .map((r, idx) => ({
@@ -32,7 +32,7 @@ async function fetchRoster(teamId) {
       name: r.person?.fullName || "Unknown",
       position: r.position?.abbreviation || "",
       lineup_spot: idx + 1,
-      bats: "R" // will be refined by stats lookup
+      bats: "R"
     }));
 }
 
@@ -41,6 +41,10 @@ export default async function handler(req, res) {
   const { game_pk, venue, away_sp_id, home_sp_id, away_team_id, home_team_id } = req.query;
 
   const results = { lineups: { away: [], home: [] }, pitcherStats: {}, playerStats: {}, weather: null, source: "lineup" };
+
+  // Cutoff: players must have played within the last 10 days to count as active
+  const cutoff = new Date();
+  cutoff.setDate(cutoff.getDate() - 10);
 
   try {
     // ── 1. Try live lineup from boxscore ──────────────────────────────
@@ -69,7 +73,7 @@ export default async function handler(req, res) {
       }
     }
 
-    // ── 2. Fallback: current active rosters (if no lineup posted yet) ─
+    // ── 2. Fallback: current active rosters ───────────────────────────
     if (!hasLineup) {
       results.source = "roster";
       const [awayRoster, homeRoster] = await Promise.all([
@@ -80,28 +84,46 @@ export default async function handler(req, res) {
       results.lineups.home = homeRoster;
     }
 
-    // ── 3. Batter stats in parallel ───────────────────────────────────
+    // ── 3. Batter stats + recent-activity check in parallel ───────────
     const allPlayers = [...results.lineups.away, ...results.lineups.home];
     const statPromises = allPlayers.map(async (p) => {
       if (!p.id) return;
+      // Pull season hitting stats AND the player's last game date
       const data = await fetchWithTimeout(
-        `https://statsapi.mlb.com/api/v1/people/${p.id}?hydrate=stats(group=hitting,type=season,season=2026)`,
-        3000
+        `https://statsapi.mlb.com/api/v1/people/${p.id}?hydrate=stats(group=hitting,type=season,season=2026),stats(group=hitting,type=lastXGames,limit=1)`,
+        3500
       );
       const person = data?.people?.[0];
-      const stat = person?.stats?.[0]?.splits?.[0]?.stat;
-      // Update batting hand from the person record
-      if (person?.batSide?.code) p.bats = person.batSide.code;
-      if (stat) {
+      if (!person) { p._inactive = true; return; }
+      if (person.batSide?.code) p.bats = person.batSide.code;
+
+      // Season stats
+      const seasonStat = person.stats?.find(s => s.type?.displayName === "season")?.splits?.[0]?.stat;
+      if (seasonStat) {
         results.playerStats[p.id] = {
-          avg: stat.avg || ".000",
-          ops: stat.ops || ".000",
-          hr: stat.homeRuns || 0,
-          slg: stat.slg || ".000",
-          obp: stat.obp || ".000",
-          ab: stat.atBats || 0
+          avg: seasonStat.avg || ".000",
+          ops: seasonStat.ops || ".000",
+          hr: seasonStat.homeRuns || 0,
+          slg: seasonStat.slg || ".000",
+          obp: seasonStat.obp || ".000",
+          ab: seasonStat.atBats || 0
         };
       }
+
+      // Recent-activity check: find most recent game date across stat splits
+      let lastGameDate = null;
+      for (const s of person.stats || []) {
+        for (const split of s.splits || []) {
+          if (split.date) {
+            const d = new Date(split.date);
+            if (!lastGameDate || d > lastGameDate) lastGameDate = d;
+          }
+        }
+      }
+      // If we have a last game date and it's older than cutoff → inactive/injured
+      if (lastGameDate && lastGameDate < cutoff) p._inactive = true;
+      // If no 2026 stats at all → not actively playing this season
+      if (!seasonStat || (seasonStat.atBats || 0) === 0) p._inactive = true;
     });
 
     // ── 4. Pitcher stats in parallel ──────────────────────────────────
@@ -160,11 +182,16 @@ export default async function handler(req, res) {
 
     await Promise.all([...statPromises, ...pitcherPromises, weatherPromise]);
 
-    // Trim roster-based lineups to top HR threats (players with most HRs) to keep prompt focused
+    // ── 6. Drop inactive/injured players ──────────────────────────────
+    for (const side of ["away", "home"]) {
+      results.lineups[side] = results.lineups[side].filter(p => !p._inactive);
+    }
+
+    // For roster-based lineups, keep only the top 9 HR threats with stats
     if (results.source === "roster") {
       for (const side of ["away", "home"]) {
         results.lineups[side] = results.lineups[side]
-          .filter(p => results.playerStats[p.id]) // only players with 2026 stats (active, playing)
+          .filter(p => results.playerStats[p.id])
           .sort((a, b) => (results.playerStats[b.id]?.hr || 0) - (results.playerStats[a.id]?.hr || 0))
           .slice(0, 9)
           .map((p, idx) => ({ ...p, lineup_spot: idx + 1 }));
