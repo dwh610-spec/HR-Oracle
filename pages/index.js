@@ -191,7 +191,7 @@ export default function HROracle() {
         setStatus(`Analyzing ${g.away_team} @ ${g.home_team} (${i+1}/${fetchedGames.length})…`);
 
         // Throttle: pause between games to stay under Gemini free-tier rate limit
-        if (i > 0) await new Promise(r => setTimeout(r, 4500));
+        if (i > 0) await new Promise(r => setTimeout(r, 6000));
 
         try {
           // Fetch live lineups, stats, weather
