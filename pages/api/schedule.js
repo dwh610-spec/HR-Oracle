@@ -20,6 +20,19 @@ export default async function handler(req, res) {
         const away = game.teams?.away;
         const home = game.teams?.home;
         const venue = game.venue?.name || "Unknown Venue";
+        for (const date of mlbData.dates || []) {
+      for (const game of date.games || []) {
+        const away = game.teams?.away;
+        const home = game.teams?.home;
+        const venue = game.venue?.name || "Unknown Venue";
+
+        // Skip games that are already final, in progress, or postponed
+        const state = game.status?.abstractGameState || "";
+        const detailed = game.status?.detailedState || "";
+        if (state === "Final" || state === "Live" ||
+            /final|completed|postponed|suspended|in progress|cancelled/i.test(detailed)) {
+          continue;
+        }
 
         // Get probable pitchers
         const awayPitcher = away?.probablePitcher;
