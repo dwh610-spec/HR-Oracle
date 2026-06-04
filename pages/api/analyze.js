@@ -113,7 +113,7 @@ Return ONLY a JSON object with a single key "batters" whose value is an array of
   "summary": "One sentence explanation."
 }`;
 
-  let MODEL = "llama-3.3-70b";
+  let MODEL = "llama3.1-70b";
   const requestBody = {
     model: MODEL,
     messages: [
@@ -139,11 +139,11 @@ Return ONLY a JSON object with a single key "batters" whose value is an array of
   }
 
   try {
-    let data = await callCerebras("llama-3.3-70b");
+    let data = await callCerebras("llama3.1-70b");
 
     // If the model name isn't recognized, fall back to the older confirmed ID
     if (data.error && /model/i.test(JSON.stringify(data.error))) {
-      data = await callCerebras("llama3.1-70b");
+      data = await callCerebras("llama3.1-8b");
     }
 
     // Retry on rate limit up to 2 times
