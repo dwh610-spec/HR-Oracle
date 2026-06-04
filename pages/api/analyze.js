@@ -113,18 +113,20 @@ Return ONLY a JSON object with a single key "batters" whose value is an array of
   "summary": "One sentence explanation."
 }`;
 
+  let MODEL = "llama-3.3-70b";
   const requestBody = {
-    model: "llama-3.3-70b",
+    model: MODEL,
     messages: [
       { role: "system", content: "You are an elite MLB sabermetrics analyst. You always respond with valid JSON only." },
       { role: "user", content: prompt }
     ],
     temperature: 0.3,
-    max_tokens: 2000,
+    max_tokens: 1400,
     response_format: { type: "json_object" }
   };
 
-  async function callCerebras() {
+  async function callCerebras(modelName) {
+    requestBody.model = modelName;
     const r = await fetch(CEREBRAS_URL, {
       method: "POST",
       headers: {
@@ -137,14 +139,19 @@ Return ONLY a JSON object with a single key "batters" whose value is an array of
   }
 
   try {
-    let data = await callCerebras();
+    let data = await callCerebras("llama-3.3-70b");
+
+    // If the model name isn't recognized, fall back to the older confirmed ID
+    if (data.error && /model/i.test(JSON.stringify(data.error))) {
+      data = await callCerebras("llama3.1-70b");
+    }
 
     // Retry on rate limit up to 2 times
     let retries = 0;
     while (data.error && /rate|429|limit/i.test(JSON.stringify(data.error)) && retries < 2) {
       retries++;
       await new Promise(r => setTimeout(r, 5000 * retries));
-      data = await callCerebras();
+      data = await callCerebras(requestBody.model);
     }
 
     if (data.error) {
