@@ -42,6 +42,28 @@ async function fetchArsenal(pitcherId) {
   return pitches.length ? pitches : null;
 }
 
+// Fetch a batter's career stats at a specific venue (highest-value HR predictor)
+async function fetchVenueHistory(playerId, venueId) {
+  if (!playerId || !venueId) return null;
+  const data = await fetchWithTimeout(
+    `https://statsapi.mlb.com/api/v1/people/${playerId}/stats?stats=byVenue&group=hitting&sportId=1`,
+    3000
+  );
+  const splits = data?.stats?.[0]?.splits || [];
+  // Find the split matching this venue
+  const match = splits.find(sp => String(sp.venue?.id) === String(venueId));
+  if (!match) return null;
+  const st = match.stat || {};
+  if (!st.atBats || st.atBats < 10) return null; // need a meaningful sample
+  return {
+    ab: st.atBats,
+    hr: st.homeRuns || 0,
+    avg: st.avg || ".000",
+    ops: st.ops || ".000",
+    slg: st.slg || ".000"
+  };
+}
+
 // Get current active roster for a team — reads official IL status codes
 async function fetchRoster(teamId) {
   if (!teamId) return [];
@@ -52,11 +74,15 @@ async function fetchRoster(teamId) {
   const roster = data?.roster || [];
   return roster
     .filter(r => r.position?.abbreviation !== "P")
-    // Drop anyone whose official roster status is an Injured List code (D10/D15/D60)
-    // or any non-active status. Status code "A" = Active.
+    // Only keep players whose official status is Active. Anything else
+    // (D10/D15/D60 injured lists, RM, DTD on the IL, bereavement, restricted,
+    // suspended, minors, etc.) is excluded.
     .filter(r => {
-      const code = r.status?.code || "";
-      return code === "A"; // only truly active players
+      const code = (r.status?.code || "").toUpperCase();
+      const desc = (r.status?.description || "").toLowerCase();
+      if (code !== "A") return false;
+      if (/injured|disabled|10-day|15-day|60-day|restricted|suspend|bereavement|paternity|minor/.test(desc)) return false;
+      return true;
     })
     .map((r, idx) => ({
       id: r.person?.id,
@@ -67,15 +93,32 @@ async function fetchRoster(teamId) {
     }));
 }
 
+// Verify a player is currently active (not on any injured list) via their person record
+async function verifyActive(playerId) {
+  if (!playerId) return false;
+  const data = await fetchWithTimeout(
+    `https://statsapi.mlb.com/api/v1/people/${playerId}?hydrate=currentTeam`,
+    2500
+  );
+  const person = data?.people?.[0];
+  if (!person) return true; // if we can't verify, don't wrongly exclude
+  // The person record exposes current status via rosterEntries / status when hydrated.
+  const statusCode = (person.status?.code || "").toUpperCase();
+  const statusDesc = (person.status?.description || "").toLowerCase();
+  if (statusCode && statusCode !== "A") return false;
+  if (/injured|disabled|10-day|15-day|60-day|restricted|suspend/.test(statusDesc)) return false;
+  return true;
+}
+
 export default async function handler(req, res) {
   res.setHeader("Access-Control-Allow-Origin", "*");
-  const { game_pk, venue, away_sp_id, home_sp_id, away_team_id, home_team_id } = req.query;
+  const { game_pk, venue, venue_id, away_sp_id, home_sp_id, away_team_id, home_team_id } = req.query;
 
   const results = { lineups: { away: [], home: [] }, pitcherStats: {}, playerStats: {}, weather: null, source: "lineup" };
 
   // Cutoff: players must have played within the last 10 days to count as active
   const cutoff = new Date();
-  cutoff.setDate(cutoff.getDate() - 10);
+  cutoff.setDate(cutoff.getDate() - 7);
 
   try {
     // ── 1. Try live lineup from boxscore ──────────────────────────────
@@ -119,14 +162,20 @@ export default async function handler(req, res) {
     const allPlayers = [...results.lineups.away, ...results.lineups.home];
     const statPromises = allPlayers.map(async (p) => {
       if (!p.id) return;
-      // Pull season hitting stats AND the player's last game date
+      // Pull season stats, game log, status, bat side, expected stats, and career venue splits
       const data = await fetchWithTimeout(
-        `https://statsapi.mlb.com/api/v1/people/${p.id}?hydrate=stats(group=hitting,type=season,season=2026),stats(group=hitting,type=lastXGames,limit=1)`,
-        3500
+        `https://statsapi.mlb.com/api/v1/people/${p.id}?hydrate=currentTeam,stats(group=hitting,type=season,season=2026),stats(group=hitting,type=gameLog,season=2026),stats(group=hitting,type=statsSingleSeasonAdvanced,season=2026),stats(group=hitting,type=byDateRange,season=2026)`,
+        4000
       );
       const person = data?.people?.[0];
       if (!person) { p._inactive = true; return; }
       if (person.batSide?.code) p.bats = person.batSide.code;
+
+      // Official status check (catches IL players like Judge directly)
+      const statusCode = (person.status?.code || "").toUpperCase();
+      const statusDesc = (person.status?.description || "").toLowerCase();
+      if (statusCode && statusCode !== "A") p._inactive = true;
+      if (/injured|disabled|10-day|15-day|60-day|restricted|suspend/.test(statusDesc)) p._inactive = true;
 
       // Season stats
       const seasonStat = person.stats?.find(s => s.type?.displayName === "season")?.splits?.[0]?.stat;
@@ -137,24 +186,42 @@ export default async function handler(req, res) {
           hr: seasonStat.homeRuns || 0,
           slg: seasonStat.slg || ".000",
           obp: seasonStat.obp || ".000",
-          ab: seasonStat.atBats || 0
+          ab: seasonStat.atBats || 0,
+          babip: seasonStat.babip || null,
+          iso: (seasonStat.slg && seasonStat.avg)
+            ? (parseFloat(seasonStat.slg) - parseFloat(seasonStat.avg)).toFixed(3)
+            : null
+        };
+      }
+      // Expected/advanced stats (xSLG/xwOBA proxy via advanced splits when available)
+      const advStat = person.stats?.find(s => /advanced/i.test(s.type?.displayName || ""))?.splits?.[0]?.stat;
+      if (advStat && results.playerStats[p.id]) {
+        // plateAppearances, babip and other advanced markers help flag luck/regression
+        results.playerStats[p.id].adv = {
+          babip: advStat.babip || null,
+          atBatsPerHomeRun: advStat.atBatsPerHomeRun || null
         };
       }
 
-      // Recent-activity check: find most recent game date across stat splits
+      // Recent-activity check via game log: find most recent game date
+      const gameLog = person.stats?.find(s => s.type?.displayName === "gameLog");
       let lastGameDate = null;
-      for (const s of person.stats || []) {
-        for (const split of s.splits || []) {
-          if (split.date) {
-            const d = new Date(split.date);
-            if (!lastGameDate || d > lastGameDate) lastGameDate = d;
-          }
+      for (const split of gameLog?.splits || []) {
+        if (split.date) {
+          const d = new Date(split.date);
+          if (!lastGameDate || d > lastGameDate) lastGameDate = d;
         }
       }
-      // If we have a last game date and it's older than cutoff → inactive/injured
+      // Career history at THIS ballpark (strongest single HR predictor per research)
+      if (venue_id && !p._inactive && results.playerStats[p.id]) {
+        const vh = await fetchVenueHistory(p.id, venue_id);
+        if (vh) results.playerStats[p.id].venueHistory = vh;
+      }
+
+      // No game in the last 7 days → not currently playing (injured/inactive)
       if (lastGameDate && lastGameDate < cutoff) p._inactive = true;
-      // If no 2026 stats at all → not actively playing this season
-      if (!seasonStat || (seasonStat.atBats || 0) === 0) p._inactive = true;
+      // No game log entries at all this season, or zero AB → not active
+      if (!lastGameDate || !seasonStat || (seasonStat.atBats || 0) === 0) p._inactive = true;
     });
 
     // ── 4. Pitcher stats + arsenal in parallel ────────────────────────
