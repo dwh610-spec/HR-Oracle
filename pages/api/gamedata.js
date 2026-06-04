@@ -17,7 +17,7 @@ async function fetchWithTimeout(url, ms = 4000) {
   }
 }
 
-// Get current active roster for a team
+// Get current active roster for a team — reads official IL status codes
 async function fetchRoster(teamId) {
   if (!teamId) return [];
   const data = await fetchWithTimeout(
@@ -27,6 +27,12 @@ async function fetchRoster(teamId) {
   const roster = data?.roster || [];
   return roster
     .filter(r => r.position?.abbreviation !== "P")
+    // Drop anyone whose official roster status is an Injured List code (D10/D15/D60)
+    // or any non-active status. Status code "A" = Active.
+    .filter(r => {
+      const code = r.status?.code || "";
+      return code === "A"; // only truly active players
+    })
     .map((r, idx) => ({
       id: r.person?.id,
       name: r.person?.fullName || "Unknown",
