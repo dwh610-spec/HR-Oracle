@@ -1,5 +1,5 @@
 // pages/api/analyze.js
-// Uses Cerebras (Llama 3.3 70B) with forced JSON output
+// Cerebras (Llama 3.3 70B) — with debug output on parse failure
 
 export default async function handler(req, res) {
   res.setHeader("Access-Control-Allow-Origin", "*");
@@ -13,24 +13,23 @@ export default async function handler(req, res) {
 
   const awayLineup = (gameData?.lineups?.away || []).map(p => {
     const s = gameData?.playerStats?.[p.id] || {};
-    return `${p.lineup_spot}. ${p.name} (${p.bats}HB) — AVG ${s.avg||"?"}, HR ${s.hr||"?"}, OPS ${s.ops||"?"}, SLG ${s.slg||"?"}`;
-  }).join("\n") || "Lineup not yet available";
+    return `${p.lineup_spot}. ${p.name} (${p.bats}HB) — AVG ${s.avg||"?"}, HR ${s.hr||"?"}, OPS ${s.ops||"?"}`;
+  }).join("\n") || "Lineup not available";
 
   const homeLineup = (gameData?.lineups?.home || []).map(p => {
     const s = gameData?.playerStats?.[p.id] || {};
-    return `${p.lineup_spot}. ${p.name} (${p.bats}HB) — AVG ${s.avg||"?"}, HR ${s.hr||"?"}, OPS ${s.ops||"?"}, SLG ${s.slg||"?"}`;
-  }).join("\n") || "Lineup not yet available";
+    return `${p.lineup_spot}. ${p.name} (${p.bats}HB) — AVG ${s.avg||"?"}, HR ${s.hr||"?"}, OPS ${s.ops||"?"}`;
+  }).join("\n") || "Lineup not available";
 
   const awayPStats = gameData?.pitcherStats?.away || {};
   const homePStats = gameData?.pitcherStats?.home || {};
   const weather = gameData?.weather || {};
 
-  const prompt = `You are an elite MLB sabermetrics analyst. Analyze this game for home run likelihood using the live 2026 season data.
+  const prompt = `Analyze this MLB game for home run likelihood. Identify the top 4-5 HR candidates from EACH team.
 
-GAME: ${game.away_team} @ ${game.home_team} at ${game.venue} — ${game.time_et} ET
-
-AWAY STARTER: ${game.away_sp.name} (${game.away_sp.throws}HP) — ERA ${awayPStats.era||game.away_sp.era}, WHIP ${awayPStats.whip||"N/A"}, HR/9 ${awayPStats.hr9||"N/A"}
-HOME STARTER: ${game.home_sp.name} (${game.home_sp.throws}HP) — ERA ${homePStats.era||game.home_sp.era}, WHIP ${homePStats.whip||"N/A"}, HR/9 ${homePStats.hr9||"N/A"}
+GAME: ${game.away_team} @ ${game.home_team} at ${game.venue}
+AWAY SP: ${game.away_sp.name} (${game.away_sp.throws}HP) ERA ${awayPStats.era||game.away_sp.era}, HR/9 ${awayPStats.hr9||"N/A"}
+HOME SP: ${game.home_sp.name} (${game.home_sp.throws}HP) ERA ${homePStats.era||game.home_sp.era}, HR/9 ${homePStats.hr9||"N/A"}
 
 AWAY LINEUP (faces ${game.home_sp.name}):
 ${awayLineup}
@@ -38,17 +37,41 @@ ${awayLineup}
 HOME LINEUP (faces ${game.away_sp.name}):
 ${homeLineup}
 
-WEATHER: ${weather.summary || "Unknown"}, wind ${weather.wind_speed || "?"}
-PARK: Use your knowledge of ${game.venue} HR factors for L/R hitters.
+WEATHER: ${weather.summary || "Unknown"}
 
-Identify the top 4-5 HR candidates from EACH team. Away batters face the home starter; home batters face the away starter.
-Weight: HR pace, OPS/SLG, platoon advantage vs pitcher hand, park factor, weather.
-- pitcher_grade: "BATTING PRACTICE" (ERA>4.5 or HR/9>1.3), "STUD" (ERA<3.0 and HR/9<0.8), or "AVERAGE"
-- batter_grade: "FIRE", "HOT", "AVERAGE", or "COLD"
-- hr_score: integer 1-100
+Away batters face the home starter; home batters face the away starter.
+Weight HR pace, OPS, platoon advantage, park factor at ${game.venue}, and weather.
 
-Respond with a JSON object containing a "candidates" array. Each candidate has: name, team, bats, lineup_spot, opposing_sp, sp_throws, pitcher_grade, batter_grade, hr_score, hr_prob (like "16%"), key_stats (array of 4 objects each with label and value), summary (one sentence).`;
+Return a JSON object with this exact structure:
+{
+  "candidates": [
+    {
+      "name": "Player Name",
+      "team": "${game.away_team}",
+      "bats": "L",
+      "lineup_spot": 3,
+      "opposing_sp": "${game.home_sp.name}",
+      "sp_throws": "${game.home_sp.throws}",
+      "pitcher_grade": "AVERAGE",
+      "batter_grade": "HOT",
+      "hr_score": 72,
+      "hr_prob": "14%",
+      "key_stats": [
+        {"label": "HR 2026", "value": "15"},
+        {"label": "OPS", "value": ".880"},
+        {"label": "AVG", "value": ".285"},
+        {"label": "SP HR/9", "value": "1.2"}
+      ],
+      "summary": "Brief insight."
+    }
+  ]
+}
 
+pitcher_grade is one of: "BATTING PRACTICE", "AVERAGE", "STUD".
+batter_grade is one of: "FIRE", "HOT", "AVERAGE", "COLD".
+hr_score is an integer 1-100.`;
+
+  let rawText = "";
   try {
     const cbRes = await fetch("https://api.cerebras.ai/v1/chat/completions", {
       method: "POST",
@@ -59,7 +82,7 @@ Respond with a JSON object containing a "candidates" array. Each candidate has: 
       body: JSON.stringify({
         model: "llama-3.3-70b",
         messages: [
-          { role: "system", content: "You are an MLB analyst that responds only with valid JSON matching the requested schema." },
+          { role: "system", content: "You respond only with valid JSON. No markdown, no explanation." },
           { role: "user", content: prompt }
         ],
         temperature: 0.3,
@@ -69,37 +92,45 @@ Respond with a JSON object containing a "candidates" array. Each candidate has: 
     });
 
     const cbData = await cbRes.json();
-    if (cbData.error) throw new Error(cbData.error.message || JSON.stringify(cbData.error));
 
-    const rawText = cbData.choices?.[0]?.message?.content || "";
+    if (cbData.error) {
+      return res.status(500).json({ error: "Cerebras API: " + (cbData.error.message || JSON.stringify(cbData.error)) });
+    }
+
+    rawText = cbData.choices?.[0]?.message?.content || "";
+
+    if (!rawText) {
+      return res.status(500).json({ error: "Empty response. Data: " + JSON.stringify(cbData).substring(0, 300) });
+    }
 
     let parsed;
     try {
       parsed = JSON.parse(rawText);
     } catch {
-      // fallback: extract object
       const o1 = rawText.indexOf("{"), o2 = rawText.lastIndexOf("}");
       if (o1 !== -1 && o2 > o1) {
-        parsed = JSON.parse(rawText.slice(o1, o2+1));
-      } else {
-        throw new Error("Could not parse JSON");
+        try { parsed = JSON.parse(rawText.slice(o1, o2+1)); } catch {}
       }
     }
 
-    // Accept either {candidates:[...]} or a bare array
+    if (!parsed) {
+      return res.status(500).json({ error: "Parse fail. Raw: " + rawText.substring(0, 250) });
+    }
+
     let candidates = [];
     if (Array.isArray(parsed)) candidates = parsed;
     else if (Array.isArray(parsed.candidates)) candidates = parsed.candidates;
-    else if (Array.isArray(parsed.players)) candidates = parsed.players;
-    else if (Array.isArray(parsed.batters)) candidates = parsed.batters;
     else {
-      // find first array value in the object
       const arr = Object.values(parsed).find(v => Array.isArray(v));
       if (arr) candidates = arr;
     }
 
+    if (!candidates.length) {
+      return res.status(500).json({ error: "No candidates in: " + JSON.stringify(parsed).substring(0, 200) });
+    }
+
     return res.status(200).json({ candidates });
   } catch (e) {
-    return res.status(500).json({ error: e.message });
+    return res.status(500).json({ error: e.message + " | raw: " + rawText.substring(0, 150) });
   }
 }
