@@ -1,5 +1,5 @@
 // pages/api/analyze.js
-// Cerebras (Llama 3.3 70B) — full error capture, free-tier token limits
+// Cerebras — using llama3.1-8b (available on all free keys)
 
 export default async function handler(req, res) {
   res.setHeader("Access-Control-Allow-Origin", "*");
@@ -11,7 +11,6 @@ export default async function handler(req, res) {
 
   if (!CEREBRAS_KEY) return res.status(500).json({ error: "CEREBRAS_API_KEY not set" });
 
-  // Keep lineups compact to stay under the 8192-token free-tier cap
   const fmt = (arr) => (arr || []).slice(0, 9).map(p => {
     const s = gameData?.playerStats?.[p.id] || {};
     return `${p.lineup_spot}.${p.name}(${p.bats}) HR${s.hr||"?"} OPS${s.ops||"?"}`;
@@ -37,7 +36,7 @@ Away batters face home SP; home batters face away SP. Weight HR pace, OPS, plato
 Return JSON: {"candidates":[{"name","team","bats","lineup_spot","opposing_sp","sp_throws","pitcher_grade","batter_grade","hr_score","hr_prob","key_stats":[{"label","value"}],"summary"}]}
 pitcher_grade: BATTING PRACTICE|AVERAGE|STUD. batter_grade: FIRE|HOT|AVERAGE|COLD. hr_score: 1-100 int. 4 key_stats each.`;
 
-  let rawText = "", fullError = "";
+  let rawText = "";
   try {
     const cbRes = await fetch("https://api.cerebras.ai/v1/chat/completions", {
       method: "POST",
@@ -46,7 +45,7 @@ pitcher_grade: BATTING PRACTICE|AVERAGE|STUD. batter_grade: FIRE|HOT|AVERAGE|COL
         "Authorization": `Bearer ${CEREBRAS_KEY}`
       },
       body: JSON.stringify({
-        model: "llama-3.3-70b",
+        model: "llama3.1-8b",
         messages: [
           { role: "system", content: "Respond only with valid JSON." },
           { role: "user", content: prompt }
@@ -59,16 +58,16 @@ pitcher_grade: BATTING PRACTICE|AVERAGE|STUD. batter_grade: FIRE|HOT|AVERAGE|COL
 
     const cbData = await cbRes.json();
 
-    if (cbData.error) {
-      // Capture the COMPLETE error message
-      fullError = typeof cbData.error === "string" ? cbData.error : JSON.stringify(cbData.error);
-      return res.status(500).json({ error: "CB_ERR: " + fullError });
+    // Surface ANY message field or error, untruncated
+    if (cbData.error || cbData.message) {
+      const msg = cbData.error
+        ? (typeof cbData.error === "string" ? cbData.error : JSON.stringify(cbData.error))
+        : cbData.message;
+      return res.status(500).json({ error: "CB: " + msg });
     }
 
     rawText = cbData.choices?.[0]?.message?.content || "";
-    if (!rawText) {
-      return res.status(500).json({ error: "EMPTY. Full: " + JSON.stringify(cbData) });
-    }
+    if (!rawText) return res.status(500).json({ error: "EMPTY: " + JSON.stringify(cbData).substring(0, 400) });
 
     let parsed;
     try { parsed = JSON.parse(rawText); }
@@ -76,14 +75,14 @@ pitcher_grade: BATTING PRACTICE|AVERAGE|STUD. batter_grade: FIRE|HOT|AVERAGE|COL
       const o1 = rawText.indexOf("{"), o2 = rawText.lastIndexOf("}");
       if (o1 !== -1 && o2 > o1) { try { parsed = JSON.parse(rawText.slice(o1, o2+1)); } catch {} }
     }
-    if (!parsed) return res.status(500).json({ error: "PARSE_FAIL: " + rawText.substring(0, 200) });
+    if (!parsed) return res.status(500).json({ error: "PARSE: " + rawText.substring(0, 200) });
 
     let candidates = [];
     if (Array.isArray(parsed)) candidates = parsed;
     else if (Array.isArray(parsed.candidates)) candidates = parsed.candidates;
     else { const arr = Object.values(parsed).find(v => Array.isArray(v)); if (arr) candidates = arr; }
 
-    if (!candidates.length) return res.status(500).json({ error: "NO_CANDS: " + JSON.stringify(parsed).substring(0, 200) });
+    if (!candidates.length) return res.status(500).json({ error: "NONE: " + JSON.stringify(parsed).substring(0, 200) });
 
     return res.status(200).json({ candidates });
   } catch (e) {
