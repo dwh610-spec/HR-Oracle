@@ -30,15 +30,17 @@ function PBadge({ grade }) {
 }
 
 function Dial({ score, size=50, fs=11 }) {
-  const color = score>=70?"#f97316":score>=50?"#eab308":score>=30?"#64748b":"#38bdf8";
-  const r=(size/2)-6, cx=size/2, cy=size/2, circ=2*Math.PI*r, dash=circ*score/100;
+  const num = typeof score === "number" ? score : parseFloat(score) || 0;
+  const color = num>=70?"#f97316":num>=50?"#eab308":num>=30?"#64748b":"#38bdf8";
+  const r=(size/2)-6, cx=size/2, cy=size/2, circ=2*Math.PI*r, dash=circ*num/100;
+  const display = num.toFixed(1);
   return (
     <div style={{ position:"relative", width:size, height:size, flexShrink:0 }}>
       <svg width={size} height={size} style={{ transform:"rotate(-90deg)" }}>
         <circle cx={cx} cy={cy} r={r} fill="none" stroke="rgba(255,255,255,0.07)" strokeWidth="4"/>
         <circle cx={cx} cy={cy} r={r} fill="none" stroke={color} strokeWidth="4" strokeDasharray={`${dash} ${circ}`} strokeLinecap="round"/>
       </svg>
-      <div style={{ position:"absolute", inset:0, display:"flex", alignItems:"center", justifyContent:"center", fontSize:fs, fontWeight:800, color, fontFamily:"monospace" }}>{score}</div>
+      <div style={{ position:"absolute", inset:0, display:"flex", alignItems:"center", justifyContent:"center", fontSize:fs-1, fontWeight:800, color, fontFamily:"monospace" }}>{display}</div>
     </div>
   );
 }
@@ -191,12 +193,12 @@ export default function HROracle() {
         setStatus(`Analyzing ${g.away_team} @ ${g.home_team} (${i+1}/${fetchedGames.length})…`);
 
         // Throttle: pause between games to stay under Gemini free-tier rate limit
-        if (i > 0) await new Promise(r => setTimeout(r, 2000));
+        if (i > 0) await new Promise(r => setTimeout(r, 4500));
 
         try {
           // Fetch live lineups, stats, weather
           const gdRes = await fetch(
-            `/api/gamedata?game_pk=${g.game_pk}&away_team=${g.away_team}&home_team=${g.home_team}&venue=${encodeURIComponent(g.venue)}&away_sp_id=${g.away_sp.id||""}&home_sp_id=${g.home_sp.id||""}&away_team_id=${g.away_team_id||""}&home_team_id=${g.home_team_id||""}&venue_id=${g.venue_id||""}`
+            `/api/gamedata?game_pk=${g.game_pk}&away_team=${g.away_team}&home_team=${g.home_team}&venue=${encodeURIComponent(g.venue)}&away_sp_id=${g.away_sp.id||""}&home_sp_id=${g.home_sp.id||""}`
           );
           const gameData = await gdRes.json();
 
