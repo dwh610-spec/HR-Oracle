@@ -58,6 +58,9 @@ function Row({ rank, b, selected, onClick }) {
           <span style={{ fontSize:16, fontWeight:700, color:"#f8fafc", fontFamily:"Georgia, serif", letterSpacing:"0.02em" }}>{b.name}</span>
           <span style={{ fontSize:9, color:"#475569", fontFamily:"monospace" }}>{b.team}</span>
           <HBadge grade={b.batter_grade}/>
+          {b.projected && (
+            <span style={{ background:"rgba(245,158,11,0.14)", color:"#f59e0b", border:"1px solid rgba(245,158,11,0.4)", borderRadius:4, padding:"1px 6px", fontSize:8, fontWeight:800, letterSpacing:"0.05em", fontFamily:"monospace", whiteSpace:"nowrap" }}>~PROJ</span>
+          )}
         </div>
         <div style={{ fontSize:10, color:"#475569", display:"flex", alignItems:"center", gap:4, flexWrap:"wrap" }}>
           vs <span style={{ color:"#94a3b8" }}>{b.opposing_sp}</span> <PBadge grade={b.pitcher_grade}/>
@@ -90,6 +93,9 @@ function Modal({ b, onClose }) {
           <div>
             <div style={{ fontSize:24, fontWeight:700, color:"#f8fafc", fontFamily:"Georgia,serif" }}>{b.name}</div>
             <div style={{ fontSize:11, color:"#64748b" }}>{b.team} · #{b.lineup_spot||"?"} in order · {b.bats}HB</div>
+            {b.projected && (
+              <div style={{ fontSize:10, color:"#f59e0b", marginTop:4, fontFamily:"monospace" }}>⚠️ PROJECTED — lineup not confirmed</div>
+            )}
           </div>
           <div style={{ display:"flex", gap:8, alignItems:"center" }}>
             <Dial score={b.hr_score} size={54} fs={13}/>
@@ -203,8 +209,8 @@ export default function HROracle() {
           );
           const gameData = await gdRes.json();
 
-          // If lineups aren't posted, mark as pending and skip (don't call AI)
-          if (!gameData.lineupsPosted) {
+          // If no lineup AND no projection possible, mark pending
+          if (!gameData.lineupsPosted && !gameData.projected) {
             setPendingGames(prev => [...prev, g]);
             continue;
           }
@@ -222,6 +228,8 @@ export default function HROracle() {
           } else if (Array.isArray(anData.candidates) && anData.candidates.length) {
             allResults.push(...anData.candidates);
             setDoneGames(prev => [...prev, g.game_id]);
+          } else {
+            setPendingGames(prev => [...prev, g]);
           }
         } catch(e) {
           errs.push(`${g.away_team}@${g.home_team}: ${e.message.substring(0,50)}`);
@@ -327,7 +335,7 @@ export default function HROracle() {
 
               {tab===0 && (
                 <>
-                  <div style={{ fontSize:9, color:"#334155", fontFamily:"monospace", letterSpacing:"0.08em", marginBottom:10 }}>TAP ANY ROW FOR FULL DETAIL</div>
+                  <div style={{ fontSize:9, color:"#334155", fontFamily:"monospace", letterSpacing:"0.08em", marginBottom:10 }}>TAP ANY ROW FOR DETAIL · <span style={{color:"#f59e0b"}}>~PROJ = projected lineup, not confirmed</span></div>
                   {top10.map((b,i)=><Row key={b.name+i} rank={i+1} b={b} selected={selected?.name===b.name} onClick={()=>setSelected(b)}/>)}
                   <div style={{ marginTop:14, padding:"10px 13px", background:"rgba(255,255,255,0.02)", border:"1px solid rgba(255,255,255,0.05)", borderRadius:8, fontSize:9, color:"#334155", fontFamily:"monospace", lineHeight:1.7 }}>
                     ⚠️ Research & entertainment only. Uses live MLB Stats API + Open-Meteo weather + Gemini AI analysis.
