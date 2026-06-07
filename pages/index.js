@@ -170,11 +170,12 @@ export default function HROracle() {
   const [status, setStatus] = useState("");
   const [errors, setErrors] = useState([]);
   const [doneGames, setDoneGames] = useState([]);
+  const [pendingGames, setPendingGames] = useState([]);
   const [selected, setSelected] = useState(null);
   const [refreshed, setRefreshed] = useState(null);
 
   async function run() {
-    setLoading(true); setErrors([]); setGames([]); setBatters([]); setDoneGames([]);
+    setLoading(true); setErrors([]); setGames([]); setBatters([]); setDoneGames([]); setPendingGames([]);
     const errs = [], allResults = [];
 
     try {
@@ -196,13 +197,18 @@ export default function HROracle() {
         if (i > 0) await new Promise(r => setTimeout(r, 4500));
 
         try {
-          // Fetch live lineups, stats, weather
+          // Fetch live lineups, stats, weather (team IDs needed for injury lookup)
           const gdRes = await fetch(
-            `/api/gamedata?game_pk=${g.game_pk}&away_team=${g.away_team}&home_team=${g.home_team}&venue=${encodeURIComponent(g.venue)}&away_sp_id=${g.away_sp.id||""}&home_sp_id=${g.home_sp.id||""}`
+            `/api/gamedata?game_pk=${g.game_pk}&away_team=${g.away_team}&home_team=${g.home_team}&venue=${encodeURIComponent(g.venue)}&away_sp_id=${g.away_sp.id||""}&home_sp_id=${g.home_sp.id||""}&away_team_id=${g.away_team_id||""}&home_team_id=${g.home_team_id||""}`
           );
           const gameData = await gdRes.json();
 
-          // Run Gemini analysis
+          // If lineups aren't posted, mark as pending and skip (don't call AI)
+          if (!gameData.lineupsPosted) {
+            setPendingGames(prev => [...prev, g]);
+            continue;
+          }
+
           const anRes = await fetch("/api/analyze", {
             method:"POST",
             headers:{"Content-Type":"application/json"},
@@ -211,7 +217,9 @@ export default function HROracle() {
           const anData = await anRes.json();
           if (anData.error) throw new Error(anData.error);
 
-          if (Array.isArray(anData.candidates) && anData.candidates.length) {
+          if (anData.skipped) {
+            setPendingGames(prev => [...prev, g]);
+          } else if (Array.isArray(anData.candidates) && anData.candidates.length) {
             allResults.push(...anData.candidates);
             setDoneGames(prev => [...prev, g.game_id]);
           }
@@ -220,8 +228,7 @@ export default function HROracle() {
         }
       }
 
-      if (!allResults.length) throw new Error("No candidates returned. " + errs.slice(0,2).join("; "));
-
+      // Pending games (lineups not posted) are NOT an error
       const seen = new Set();
       const final = allResults
         .filter(b => { const k=`${b.name}|${b.team}`; if(seen.has(k))return false; seen.add(k); return true; })
@@ -331,8 +338,34 @@ export default function HROracle() {
             </>
           )}
 
+          {/* Pending games — lineups not posted yet */}
+          {!loading && pendingGames.length > 0 && (
+            <div style={{ marginTop: batters.length ? 24 : 0, background:"rgba(56,189,248,0.05)", border:"1px solid rgba(56,189,248,0.18)", borderRadius:12, padding:"16px 18px" }}>
+              <div style={{ fontSize:13, color:"#38bdf8", fontFamily:"monospace", fontWeight:700, marginBottom:6, letterSpacing:"0.04em" }}>
+                ⏳ {pendingGames.length} GAME{pendingGames.length>1?"S":""} AWAITING LINEUPS
+              </div>
+              <p style={{ fontSize:11, color:"#64748b", margin:"0 0 12px", lineHeight:1.6 }}>
+                These games don't have official lineups posted yet. MLB usually posts lineups 2–3 hours before first pitch. Refresh closer to game time to analyze them.
+              </p>
+              <div style={{ display:"flex", flexDirection:"column", gap:6 }}>
+                {pendingGames
+                  .sort((a,b)=> (a.time_et||"").localeCompare(b.time_et||""))
+                  .map(g => (
+                  <div key={g.game_id} style={{ display:"flex", justifyContent:"space-between", alignItems:"center", background:"rgba(255,255,255,0.02)", border:"1px solid rgba(255,255,255,0.05)", borderRadius:8, padding:"8px 12px" }}>
+                    <span style={{ fontSize:13, fontWeight:700, color:"#cbd5e1", fontFamily:"'Barlow Condensed',sans-serif", letterSpacing:"0.03em" }}>
+                      {g.away_team} @ {g.home_team}
+                    </span>
+                    <span style={{ fontSize:11, color:"#475569", fontFamily:"monospace" }}>
+                      {g.time_et} ET
+                    </span>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+
           {/* Empty state */}
-          {!loading && !batters.length && !errors.length && (
+          {!loading && !batters.length && !errors.length && pendingGames.length === 0 && (
             <div style={{ textAlign:"center", padding:"50px 16px" }}>
               <div style={{ fontSize:52, marginBottom:14 }}>⚾</div>
               <div style={{ fontSize:22, fontWeight:700, color:"#1e293b", fontFamily:"'Barlow Condensed',sans-serif", marginBottom:8 }}>Today's slate awaits</div>
