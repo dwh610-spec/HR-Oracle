@@ -1,6 +1,6 @@
 // pages/api/gamedata.js
 // Live lineups + stats + weather + injury filter
-// v4: reports lineupsPosted flag so analyze can skip unconfirmed games
+// v5: if no posted lineup, builds PROJECTED lineup from active roster (IL excluded)
 
 export default async function handler(req, res) {
   res.setHeader("Access-Control-Allow-Origin", "*");
@@ -8,13 +8,15 @@ export default async function handler(req, res) {
   const { game_pk, venue, away_sp_id, home_sp_id, away_team_id, home_team_id } = req.query;
 
   try {
-    const results = { lineups: {}, pitcherStats: {}, weather: null, injured: [], lineupsPosted: false };
+    const results = {
+      lineups: {}, pitcherStats: {}, weather: null, injured: [],
+      lineupsPosted: false, projected: false
+    };
 
-    // ── 1. Injury set — only explicit injury codes ───────────────────
+    // ── 1. Injury set ─────────────────────────────────────────────────
     const INJURY_CODES = ["D7","D10","D15","D60","DTD","IL","IL7","IL10","IL15","IL60","RM","BRV","PL","SU","RES","DEC","FME"];
     const injuredIds = new Set();
     const injuredNames = [];
-
     async function loadInjuries(teamId) {
       if (!teamId) return;
       try {
@@ -37,7 +39,7 @@ export default async function handler(req, res) {
     await Promise.all([loadInjuries(away_team_id), loadInjuries(home_team_id)]);
     results.injured = injuredNames;
 
-    // ── 2. Live lineup from boxscore ──────────────────────────────────
+    // ── 2. Try posted lineup from boxscore ────────────────────────────
     let awayCount = 0, homeCount = 0;
     if (game_pk) {
       try {
@@ -51,15 +53,12 @@ export default async function handler(req, res) {
           battingOrder.forEach((id, idx) => {
             if (injuredIds.has(id)) return;
             const player = players[`ID${id}`];
-            if (player) {
-              lineup.push({
-                id,
-                name: player.person?.fullName || "Unknown",
-                position: player.position?.abbreviation || "",
-                lineup_spot: idx + 1,
-                bats: player.person?.batSide?.code || "R"
-              });
-            }
+            if (player) lineup.push({
+              id, name: player.person?.fullName || "Unknown",
+              position: player.position?.abbreviation || "",
+              lineup_spot: idx + 1,
+              bats: player.person?.batSide?.code || "R"
+            });
           });
           results.lineups[side] = lineup;
           if (side === "away") awayCount = lineup.length;
@@ -68,51 +67,91 @@ export default async function handler(req, res) {
       } catch {}
     }
 
-    // A real posted lineup has ~9 batters per side. Require both sides to have
-    // at least 8 to count as "posted" (guards against partial/empty data).
     results.lineupsPosted = (awayCount >= 8 && homeCount >= 8);
 
-    // If lineups aren't posted, stop here — no point fetching the rest
+    // ── 3. If NOT posted, build PROJECTED lineup from active roster ────
     if (!results.lineupsPosted) {
-      return res.status(200).json(results);
+      results.projected = true;
+
+      async function activeHitters(teamId) {
+        if (!teamId) return [];
+        try {
+          const rRes = await fetch(`https://statsapi.mlb.com/api/v1/teams/${teamId}/roster/active`);
+          const rData = await rRes.json();
+          const hitters = [];
+          for (const entry of rData.roster || []) {
+            const pos = entry.position?.abbreviation || "";
+            // skip pitchers; skip injured
+            if (pos === "P" || pos === "SP" || pos === "RP") continue;
+            if (injuredIds.has(entry.person?.id)) continue;
+            hitters.push({
+              id: entry.person?.id,
+              name: entry.person?.fullName || "Unknown",
+              position: pos,
+              bats: "R" // refined below via stats fetch
+            });
+          }
+          return hitters;
+        } catch { return []; }
+      }
+
+      const [awayHit, homeHit] = await Promise.all([
+        activeHitters(away_team_id),
+        activeHitters(home_team_id)
+      ]);
+      // We don't know the exact order; assign provisional spots, AI will pick top HR threats
+      results.lineups.away = awayHit.map((p, i) => ({ ...p, lineup_spot: i + 1 }));
+      results.lineups.home = homeHit.map((p, i) => ({ ...p, lineup_spot: i + 1 }));
     }
 
-    // ── 3. Hitting stats ──────────────────────────────────────────────
+    // ── 4. Hitting stats (works for both posted & projected) ──────────
     const allPlayers = [...(results.lineups.away||[]), ...(results.lineups.home||[])];
     const playerStats = {};
     await Promise.all(allPlayers.map(async (p) => {
       try {
         const sRes = await fetch(`https://statsapi.mlb.com/api/v1/people/${p.id}?hydrate=stats(group=hitting,type=season,season=2026)`);
         const sData = await sRes.json();
-        const stat = sData.people?.[0]?.stats?.[0]?.splits?.[0]?.stat;
+        const person = sData.people?.[0];
+        const stat = person?.stats?.[0]?.splits?.[0]?.stat;
+        // capture real bat side
+        if (person?.batSide?.code) p.bats = person.batSide.code;
         if (stat) {
           playerStats[p.id] = {
             avg: stat.avg||".000", ops: stat.ops||".000",
-            hr: stat.homeRuns||0, slg: stat.slg||".000", obp: stat.obp||".000"
+            hr: stat.homeRuns||0, slg: stat.slg||".000", obp: stat.obp||".000",
+            ab: stat.atBats||0
           };
         }
       } catch {}
     }));
     results.playerStats = playerStats;
 
-    // ── 4. Pitcher stats ──────────────────────────────────────────────
+    // For projected lineups, drop players with very few ABs (not regulars)
+    if (results.projected) {
+      for (const side of ["away","home"]) {
+        results.lineups[side] = (results.lineups[side]||[])
+          .filter(p => (playerStats[p.id]?.ab || 0) >= 30)  // regulars only
+          .sort((a,b) => (playerStats[b.id]?.ops||"0").localeCompare(playerStats[a.id]?.ops||"0"))
+          .slice(0, 9);
+      }
+    }
+
+    // ── 5. Pitcher stats ──────────────────────────────────────────────
     for (const [key, pid] of [["away", away_sp_id], ["home", home_sp_id]]) {
       if (!pid || pid === "null") continue;
       try {
         const pRes = await fetch(`https://statsapi.mlb.com/api/v1/people/${pid}?hydrate=stats(group=pitching,type=season,season=2026)`);
         const pData = await pRes.json();
         const stat = pData.people?.[0]?.stats?.[0]?.splits?.[0]?.stat;
-        if (stat) {
-          results.pitcherStats[key] = {
-            era: stat.era||"N/A", whip: stat.whip||"N/A",
-            hr9: stat.homeRunsPer9||"N/A", ip: stat.inningsPitched||"0",
-            hr_allowed: stat.homeRuns||0
-          };
-        }
+        if (stat) results.pitcherStats[key] = {
+          era: stat.era||"N/A", whip: stat.whip||"N/A",
+          hr9: stat.homeRunsPer9||"N/A", ip: stat.inningsPitched||"0",
+          hr_allowed: stat.homeRuns||0
+        };
       } catch {}
     }
 
-    // ── 5. Weather ────────────────────────────────────────────────────
+    // ── 6. Weather ────────────────────────────────────────────────────
     const venueCoords = {
       "Fenway Park":[42.3467,-71.0972],"Yankee Stadium":[40.8296,-73.9262],
       "Citi Field":[40.7571,-73.8458],"Citizens Bank Park":[39.9061,-75.1665],
