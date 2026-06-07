@@ -1,5 +1,6 @@
 // pages/api/schedule.js
-// Fetches today's MLB schedule from the official MLB Stats API (free, no key needed)
+// Today's MLB schedule from official MLB Stats API (free)
+// v2: includes team IDs for injury/roster lookups
 
 export default async function handler(req, res) {
   res.setHeader("Access-Control-Allow-Origin", "*");
@@ -7,33 +8,22 @@ export default async function handler(req, res) {
   try {
     const today = new Date().toISOString().split("T")[0];
 
-    // MLB Stats API — completely free, no auth required
     const mlbRes = await fetch(
-      `https://statsapi.mlb.com/api/v1/schedule?sportId=1&date=${today}&hydrate=probablePitcher(note),team,venue,weather,linescore`
+      `https://statsapi.mlb.com/api/v1/schedule?sportId=1&date=${today}&hydrate=probablePitcher(note),team,venue`
     );
     const mlbData = await mlbRes.json();
 
     const games = [];
 
-   for (const date of mlbData.dates || []) {
+    for (const date of mlbData.dates || []) {
       for (const game of date.games || []) {
         const away = game.teams?.away;
         const home = game.teams?.home;
         const venue = game.venue?.name || "Unknown Venue";
 
-        // Skip games that are already final, in progress, or postponed
-        const state = game.status?.abstractGameState || "";
-        const detailed = game.status?.detailedState || "";
-        if (state === "Final" || state === "Live" ||
-            /final|completed|postponed|suspended|in progress|cancelled/i.test(detailed)) {
-          continue;
-        }
-
-        // Get probable pitchers
         const awayPitcher = away?.probablePitcher;
         const homePitcher = home?.probablePitcher;
 
-        // Fetch pitcher stats if available
         let awayEra = "N/A", homeEra = "N/A";
         let awayThrows = "R", homeThrows = "R";
 
@@ -46,7 +36,6 @@ export default async function handler(req, res) {
             awayThrows = pData.people?.[0]?.pitchHand?.code || "R";
           } catch {}
         }
-
         if (homePitcher?.id) {
           try {
             const pRes = await fetch(`https://statsapi.mlb.com/api/v1/people/${homePitcher.id}?hydrate=stats(group=pitching,type=season,season=2026)`);
@@ -57,7 +46,6 @@ export default async function handler(req, res) {
           } catch {}
         }
 
-        // Get game time
         const gameTime = game.gameDate ? new Date(game.gameDate).toLocaleTimeString("en-US", {
           hour: "numeric", minute: "2-digit", timeZone: "America/New_York"
         }) : "TBD";
@@ -65,28 +53,15 @@ export default async function handler(req, res) {
         games.push({
           game_id: `${away?.team?.abbreviation}_${home?.team?.abbreviation}`,
           game_pk: game.gamePk,
-          away_team_id: away?.team?.id || null,
-          home_team_id: home?.team?.id || null,
           away_team: away?.team?.abbreviation || "???",
           home_team: home?.team?.abbreviation || "???",
-          away_team_full: away?.team?.name || "",
-          home_team_full: home?.team?.name || "",
+          away_team_id: away?.team?.id || null,
+          home_team_id: home?.team?.id || null,
           time_et: gameTime,
           venue,
-          venue_id: game.venue?.id || null,
           status: game.status?.detailedState || "",
-          away_sp: {
-            id: awayPitcher?.id || null,
-            name: awayPitcher?.fullName || "TBD",
-            throws: awayThrows,
-            era: awayEra
-          },
-          home_sp: {
-            id: homePitcher?.id || null,
-            name: homePitcher?.fullName || "TBD",
-            throws: homeThrows,
-            era: homeEra
-          }
+          away_sp: { id: awayPitcher?.id || null, name: awayPitcher?.fullName || "TBD", throws: awayThrows, era: awayEra },
+          home_sp: { id: homePitcher?.id || null, name: homePitcher?.fullName || "TBD", throws: homeThrows, era: homeEra }
         });
       }
     }
