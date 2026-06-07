@@ -1,5 +1,5 @@
 // pages/api/analyze.js
-// Cerebras — using llama3.1-8b (available on all free keys)
+// Cerebras gpt-oss-120b (confirmed available on this key)
 
 export default async function handler(req, res) {
   res.setHeader("Access-Control-Allow-Origin", "*");
@@ -13,7 +13,7 @@ export default async function handler(req, res) {
 
   const fmt = (arr) => (arr || []).slice(0, 9).map(p => {
     const s = gameData?.playerStats?.[p.id] || {};
-    return `${p.lineup_spot}.${p.name}(${p.bats}) HR${s.hr||"?"} OPS${s.ops||"?"}`;
+    return `${p.lineup_spot}.${p.name}(${p.bats}) HR${s.hr||"?"} OPS${s.ops||"?"} AVG${s.avg||"?"}`;
   }).join("; ") || "TBD";
 
   const awayLineup = fmt(gameData?.lineups?.away);
@@ -22,7 +22,7 @@ export default async function handler(req, res) {
   const homeP = gameData?.pitcherStats?.home || {};
   const weather = gameData?.weather || {};
 
-  const prompt = `MLB HR analysis. Top 4-5 HR candidates per team.
+  const prompt = `MLB home run analysis. Identify the top 4-5 HR candidates per team.
 
 ${game.away_team} @ ${game.home_team} at ${game.venue}
 Away SP ${game.away_sp.name} (${game.away_sp.throws}) ERA ${awayP.era||game.away_sp.era} HR/9 ${awayP.hr9||"?"}
@@ -31,10 +31,10 @@ Away lineup (vs ${game.home_sp.name}): ${awayLineup}
 Home lineup (vs ${game.away_sp.name}): ${homeLineup}
 Weather: ${weather.summary||"?"}
 
-Away batters face home SP; home batters face away SP. Weight HR pace, OPS, platoon, ${game.venue} park factor, weather.
+Away batters face home SP; home batters face away SP. Weight HR pace, OPS, platoon advantage vs pitcher hand, ${game.venue} park factor, and weather.
 
-Return JSON: {"candidates":[{"name","team","bats","lineup_spot","opposing_sp","sp_throws","pitcher_grade","batter_grade","hr_score","hr_prob","key_stats":[{"label","value"}],"summary"}]}
-pitcher_grade: BATTING PRACTICE|AVERAGE|STUD. batter_grade: FIRE|HOT|AVERAGE|COLD. hr_score: 1-100 int. 4 key_stats each.`;
+Return ONLY this JSON (no markdown): {"candidates":[{"name":"","team":"","bats":"L","lineup_spot":3,"opposing_sp":"","sp_throws":"R","pitcher_grade":"AVERAGE","batter_grade":"HOT","hr_score":72,"hr_prob":"14%","key_stats":[{"label":"HR 2026","value":"15"},{"label":"OPS","value":".880"},{"label":"AVG","value":".285"},{"label":"SP HR/9","value":"1.2"}],"summary":""}]}
+pitcher_grade: BATTING PRACTICE|AVERAGE|STUD. batter_grade: FIRE|HOT|AVERAGE|COLD. hr_score: integer 1-100.`;
 
   let rawText = "";
   try {
@@ -45,20 +45,19 @@ pitcher_grade: BATTING PRACTICE|AVERAGE|STUD. batter_grade: FIRE|HOT|AVERAGE|COL
         "Authorization": `Bearer ${CEREBRAS_KEY}`
       },
       body: JSON.stringify({
-        model: "llama3.1-8b",
+        model: "gpt-oss-120b",
         messages: [
-          { role: "system", content: "Respond only with valid JSON." },
+          { role: "system", content: "You are an MLB analyst. Respond only with valid JSON, no markdown." },
           { role: "user", content: prompt }
         ],
         temperature: 0.3,
-        max_completion_tokens: 3000,
+        max_completion_tokens: 4000,
         response_format: { type: "json_object" }
       })
     });
 
     const cbData = await cbRes.json();
 
-    // Surface ANY message field or error, untruncated
     if (cbData.error || cbData.message) {
       const msg = cbData.error
         ? (typeof cbData.error === "string" ? cbData.error : JSON.stringify(cbData.error))
@@ -67,7 +66,7 @@ pitcher_grade: BATTING PRACTICE|AVERAGE|STUD. batter_grade: FIRE|HOT|AVERAGE|COL
     }
 
     rawText = cbData.choices?.[0]?.message?.content || "";
-    if (!rawText) return res.status(500).json({ error: "EMPTY: " + JSON.stringify(cbData).substring(0, 400) });
+    if (!rawText) return res.status(500).json({ error: "EMPTY: " + JSON.stringify(cbData).substring(0, 300) });
 
     let parsed;
     try { parsed = JSON.parse(rawText); }
