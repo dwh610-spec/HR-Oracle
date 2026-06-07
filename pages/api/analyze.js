@@ -1,5 +1,5 @@
 // pages/api/analyze.js
-// Cerebras gpt-oss-120b — only analyzes REAL posted lineups, never invents players
+// Cerebras gpt-oss-120b — handles confirmed AND projected lineups
 
 export default async function handler(req, res) {
   res.setHeader("Access-Control-Allow-Origin", "*");
@@ -9,20 +9,20 @@ export default async function handler(req, res) {
   const CEREBRAS_KEY = process.env.CEREBRAS_API_KEY;
   if (!CEREBRAS_KEY) return res.status(500).json({ error: "CEREBRAS_API_KEY not set" });
 
-  // ── GATE: refuse to analyze if lineups aren't actually posted ──────
-  if (!gameData?.lineupsPosted) {
-    return res.status(200).json({ candidates: [], skipped: true, reason: "Lineup not posted yet" });
-  }
-
   const awayList = gameData?.lineups?.away || [];
   const homeList = gameData?.lineups?.home || [];
+  const isProjected = !!gameData?.projected;
 
-  // Build an explicit allow-list of valid player names
+  // Need at least some hitters to work with
+  if (awayList.length < 3 || homeList.length < 3) {
+    return res.status(200).json({ candidates: [], skipped: true, reason: "Not enough roster data" });
+  }
+
   const validNames = [...awayList, ...homeList].map(p => p.name);
 
   const fmt = (arr) => arr.map(p => {
     const s = gameData?.playerStats?.[p.id] || {};
-    return `${p.lineup_spot}.${p.name}(${p.bats}) HR${s.hr||"?"} OPS${s.ops||"?"} AVG${s.avg||"?"}`;
+    return `${p.name}(${p.bats}) HR${s.hr||"?"} OPS${s.ops||"?"} AVG${s.avg||"?"}`;
   }).join("; ") || "none";
 
   const awayLineup = fmt(awayList);
@@ -31,21 +31,29 @@ export default async function handler(req, res) {
   const homeP = gameData?.pitcherStats?.home || {};
   const weather = gameData?.weather || {};
 
+  const lineupNote = isProjected
+    ? `NOTE: Official lineups are NOT posted yet. The players below are the healthy active roster regulars (injured players already removed). Project the most likely HR threats and estimate batting order positions.`
+    : `These are the CONFIRMED posted starting lineups.`;
+
   const prompt = `MLB home run analysis. Identify the top 4-5 HR candidates per team.
 
 ${game.away_team} @ ${game.home_team} at ${game.venue}
 Away SP ${game.away_sp.name} (${game.away_sp.throws}) ERA ${awayP.era||game.away_sp.era} HR/9 ${awayP.hr9||"?"}
 Home SP ${game.home_sp.name} (${game.home_sp.throws}) ERA ${homeP.era||game.home_sp.era} HR/9 ${homeP.hr9||"?"}
-Away lineup (vs ${game.home_sp.name}): ${awayLineup}
-Home lineup (vs ${game.away_sp.name}): ${homeLineup}
+
+${lineupNote}
+
+Away players (vs ${game.home_sp.name}): ${awayLineup}
+Home players (vs ${game.away_sp.name}): ${homeLineup}
 Weather: ${weather.summary||"?"}
 
 CRITICAL RULES:
-- You may ONLY select players from the exact lineups listed above. Do NOT add any player not in these lineups.
-- Do NOT use prior knowledge of team rosters. The lineups above are the ONLY valid players.
+- You may ONLY select players from the lists above. Do NOT add any player not listed.
+- Do NOT use prior knowledge of rosters; the lists above are the ONLY valid players.
 - Away batters face home SP; home batters face away SP.
 - Weight HR pace, OPS, platoon advantage vs pitcher hand, ${game.venue} park factor, and weather.
-- For hr_score, use a DECIMAL with one decimal place (e.g. 72.4) so scores rarely tie.
+- For hr_score, use a DECIMAL with one decimal place (e.g. 72.4).
+- For lineup_spot, estimate the likely batting order position (1-9).
 
 Return ONLY this JSON (no markdown): {"candidates":[{"name":"","team":"","bats":"L","lineup_spot":3,"opposing_sp":"","sp_throws":"R","pitcher_grade":"AVERAGE","batter_grade":"HOT","hr_score":72.4,"hr_prob":"14%","key_stats":[{"label":"HR 2026","value":"15"},{"label":"OPS","value":".880"},{"label":"AVG","value":".285"},{"label":"SP HR/9","value":"1.2"}],"summary":""}]}
 pitcher_grade: BATTING PRACTICE|AVERAGE|STUD. batter_grade: FIRE|HOT|AVERAGE|COLD. hr_score: decimal 1.0-100.0.`;
@@ -58,7 +66,7 @@ pitcher_grade: BATTING PRACTICE|AVERAGE|STUD. batter_grade: FIRE|HOT|AVERAGE|COL
       body: JSON.stringify({
         model: "gpt-oss-120b",
         messages: [
-          { role: "system", content: "You are an MLB analyst. Respond only with valid JSON. Only use players from the provided lineups; never invent players from memory." },
+          { role: "system", content: "You are an MLB analyst. Respond only with valid JSON. Only use players from the provided lists; never invent players from memory." },
           { role: "user", content: prompt }
         ],
         temperature: 0.3,
@@ -89,17 +97,18 @@ pitcher_grade: BATTING PRACTICE|AVERAGE|STUD. batter_grade: FIRE|HOT|AVERAGE|COL
     else if (Array.isArray(parsed.candidates)) candidates = parsed.candidates;
     else { const arr = Object.values(parsed).find(v => Array.isArray(v)); if (arr) candidates = arr; }
 
-    // HARD FILTER: only keep players who are actually in the posted lineup
+    // Hard filter: only real listed players
     const validLower = validNames.map(n => n.toLowerCase());
     candidates = candidates.filter(c => validLower.includes((c.name||"").toLowerCase()));
 
-    // normalize decimal score
+    // normalize decimal + tag projected status
     candidates = candidates.map(c => ({
       ...c,
-      hr_score: Math.round((parseFloat(c.hr_score)||0) * 10) / 10
+      hr_score: Math.round((parseFloat(c.hr_score)||0) * 10) / 10,
+      projected: isProjected
     }));
 
-    return res.status(200).json({ candidates });
+    return res.status(200).json({ candidates, projected: isProjected });
   } catch (e) {
     return res.status(500).json({ error: "CATCH: " + e.message });
   }
