@@ -1,6 +1,6 @@
 // pages/api/gamedata.js
 // Live lineups + stats + weather + injury filter
-// v3: only excludes players with EXPLICIT injury status codes (fail-safe)
+// v4: reports lineupsPosted flag so analyze can skip unconfirmed games
 
 export default async function handler(req, res) {
   res.setHeader("Access-Control-Allow-Origin", "*");
@@ -8,12 +8,9 @@ export default async function handler(req, res) {
   const { game_pk, venue, away_sp_id, home_sp_id, away_team_id, home_team_id } = req.query;
 
   try {
-    const results = { lineups: {}, pitcherStats: {}, weather: null, injured: [] };
+    const results = { lineups: {}, pitcherStats: {}, weather: null, injured: [], lineupsPosted: false };
 
-    // ── 1. Build injured set — ONLY explicit injury statuses ──────────
-    // MLB status codes that mean a player is OUT:
-    //   D7, D10, D15, D60 = injured lists; DTD = day-to-day;
-    //   IL10, IL15, IL60 = injured lists; RM = rehab; BRV, PL, SU, RES etc.
+    // ── 1. Injury set — only explicit injury codes ───────────────────
     const INJURY_CODES = ["D7","D10","D15","D60","DTD","IL","IL7","IL10","IL15","IL60","RM","BRV","PL","SU","RES","DEC","FME"];
     const injuredIds = new Set();
     const injuredNames = [];
@@ -26,24 +23,22 @@ export default async function handler(req, res) {
         for (const entry of rData.roster || []) {
           const code = (entry.status?.code || "").toUpperCase().trim();
           const desc = (entry.status?.description || "").toLowerCase();
-          // Exclude ONLY if the code is a known injury code OR description mentions injury
           const isInjured = INJURY_CODES.includes(code) ||
-            desc.includes("injured") || desc.includes("day-to-day") || desc.includes("10-day") ||
-            desc.includes("15-day") || desc.includes("60-day") || desc.includes("disabled");
+            desc.includes("injured") || desc.includes("day-to-day") ||
+            desc.includes("10-day") || desc.includes("15-day") ||
+            desc.includes("60-day") || desc.includes("disabled");
           if (isInjured) {
             injuredIds.add(entry.person?.id);
             injuredNames.push(`${entry.person?.fullName} (${entry.status?.description || code})`);
           }
         }
-      } catch {
-        // Fail-safe: if roster fetch fails, we simply don't filter (better than dropping everyone)
-      }
+      } catch {}
     }
-
     await Promise.all([loadInjuries(away_team_id), loadInjuries(home_team_id)]);
     results.injured = injuredNames;
 
     // ── 2. Live lineup from boxscore ──────────────────────────────────
+    let awayCount = 0, homeCount = 0;
     if (game_pk) {
       try {
         const boxRes = await fetch(`https://statsapi.mlb.com/api/v1/game/${game_pk}/boxscore`);
@@ -54,7 +49,7 @@ export default async function handler(req, res) {
           const players = teamData?.players || {};
           const lineup = [];
           battingOrder.forEach((id, idx) => {
-            if (injuredIds.has(id)) return; // skip injured
+            if (injuredIds.has(id)) return;
             const player = players[`ID${id}`];
             if (player) {
               lineup.push({
@@ -67,8 +62,19 @@ export default async function handler(req, res) {
             }
           });
           results.lineups[side] = lineup;
+          if (side === "away") awayCount = lineup.length;
+          else homeCount = lineup.length;
         }
       } catch {}
+    }
+
+    // A real posted lineup has ~9 batters per side. Require both sides to have
+    // at least 8 to count as "posted" (guards against partial/empty data).
+    results.lineupsPosted = (awayCount >= 8 && homeCount >= 8);
+
+    // If lineups aren't posted, stop here — no point fetching the rest
+    if (!results.lineupsPosted) {
+      return res.status(200).json(results);
     }
 
     // ── 3. Hitting stats ──────────────────────────────────────────────
