@@ -1,38 +1,43 @@
 // pages/api/gamedata.js
-// Fetches live lineups + Statcast stats + INJURY STATUS for a game
-// Strict injury filter: any player not "Active" is excluded
+// Live lineups + stats + weather + injury filter
+// v3: only excludes players with EXPLICIT injury status codes (fail-safe)
 
 export default async function handler(req, res) {
   res.setHeader("Access-Control-Allow-Origin", "*");
 
-  const { game_pk, away_team, home_team, venue, away_sp_id, home_sp_id,
-          away_team_id, home_team_id } = req.query;
+  const { game_pk, venue, away_sp_id, home_sp_id, away_team_id, home_team_id } = req.query;
 
   try {
     const results = { lineups: {}, pitcherStats: {}, weather: null, injured: [] };
 
-    // ── 1. Build injured-player set from team rosters ─────────────────
-    // Get roster with status for both teams, collect anyone not Active
+    // ── 1. Build injured set — ONLY explicit injury statuses ──────────
+    // MLB status codes that mean a player is OUT:
+    //   D7, D10, D15, D60 = injured lists; DTD = day-to-day;
+    //   IL10, IL15, IL60 = injured lists; RM = rehab; BRV, PL, SU, RES etc.
+    const INJURY_CODES = ["D7","D10","D15","D60","DTD","IL","IL7","IL10","IL15","IL60","RM","BRV","PL","SU","RES","DEC","FME"];
     const injuredIds = new Set();
     const injuredNames = [];
 
     async function loadInjuries(teamId) {
       if (!teamId) return;
       try {
-        // 40-man roster includes status codes
-        const rRes = await fetch(
-          `https://statsapi.mlb.com/api/v1/teams/${teamId}/roster/40Man`
-        );
+        const rRes = await fetch(`https://statsapi.mlb.com/api/v1/teams/${teamId}/roster/depthChart`);
         const rData = await rRes.json();
         for (const entry of rData.roster || []) {
-          const code = entry.status?.code || "A";
-          // "A" = Active. Anything else (D10, D60, DTD, etc.) = exclude
-          if (code !== "A") {
+          const code = (entry.status?.code || "").toUpperCase().trim();
+          const desc = (entry.status?.description || "").toLowerCase();
+          // Exclude ONLY if the code is a known injury code OR description mentions injury
+          const isInjured = INJURY_CODES.includes(code) ||
+            desc.includes("injured") || desc.includes("day-to-day") || desc.includes("10-day") ||
+            desc.includes("15-day") || desc.includes("60-day") || desc.includes("disabled");
+          if (isInjured) {
             injuredIds.add(entry.person?.id);
             injuredNames.push(`${entry.person?.fullName} (${entry.status?.description || code})`);
           }
         }
-      } catch {}
+      } catch {
+        // Fail-safe: if roster fetch fails, we simply don't filter (better than dropping everyone)
+      }
     }
 
     await Promise.all([loadInjuries(away_team_id), loadInjuries(home_team_id)]);
@@ -43,16 +48,13 @@ export default async function handler(req, res) {
       try {
         const boxRes = await fetch(`https://statsapi.mlb.com/api/v1/game/${game_pk}/boxscore`);
         const boxData = await boxRes.json();
-
-        for (const side of ["away", "home"]) {
+        for (const side of ["away","home"]) {
           const teamData = boxData.teams?.[side];
           const battingOrder = teamData?.battingOrder || [];
           const players = teamData?.players || {};
           const lineup = [];
-
           battingOrder.forEach((id, idx) => {
-            // STRICT: skip any injured player
-            if (injuredIds.has(id)) return;
+            if (injuredIds.has(id)) return; // skip injured
             const player = players[`ID${id}`];
             if (player) {
               lineup.push({
@@ -69,45 +71,36 @@ export default async function handler(req, res) {
       } catch {}
     }
 
-    // ── 3. Season hitting stats for lineup players ───────────────────
+    // ── 3. Hitting stats ──────────────────────────────────────────────
     const allPlayers = [...(results.lineups.away||[]), ...(results.lineups.home||[])];
     const playerStats = {};
     await Promise.all(allPlayers.map(async (p) => {
       try {
-        const sRes = await fetch(
-          `https://statsapi.mlb.com/api/v1/people/${p.id}?hydrate=stats(group=hitting,type=season,season=2026)`
-        );
+        const sRes = await fetch(`https://statsapi.mlb.com/api/v1/people/${p.id}?hydrate=stats(group=hitting,type=season,season=2026)`);
         const sData = await sRes.json();
         const stat = sData.people?.[0]?.stats?.[0]?.splits?.[0]?.stat;
         if (stat) {
           playerStats[p.id] = {
-            avg: stat.avg || ".000",
-            ops: stat.ops || ".000",
-            hr: stat.homeRuns || 0,
-            slg: stat.slg || ".000",
-            obp: stat.obp || ".000"
+            avg: stat.avg||".000", ops: stat.ops||".000",
+            hr: stat.homeRuns||0, slg: stat.slg||".000", obp: stat.obp||".000"
           };
         }
       } catch {}
     }));
     results.playerStats = playerStats;
 
-    // ── 4. Pitcher season stats ───────────────────────────────────────
+    // ── 4. Pitcher stats ──────────────────────────────────────────────
     for (const [key, pid] of [["away", away_sp_id], ["home", home_sp_id]]) {
       if (!pid || pid === "null") continue;
       try {
-        const pRes = await fetch(
-          `https://statsapi.mlb.com/api/v1/people/${pid}?hydrate=stats(group=pitching,type=season,season=2026)`
-        );
+        const pRes = await fetch(`https://statsapi.mlb.com/api/v1/people/${pid}?hydrate=stats(group=pitching,type=season,season=2026)`);
         const pData = await pRes.json();
         const stat = pData.people?.[0]?.stats?.[0]?.splits?.[0]?.stat;
         if (stat) {
           results.pitcherStats[key] = {
-            era: stat.era || "N/A",
-            whip: stat.whip || "N/A",
-            hr9: stat.homeRunsPer9 || "N/A",
-            ip: stat.inningsPitched || "0",
-            hr_allowed: stat.homeRuns || 0
+            era: stat.era||"N/A", whip: stat.whip||"N/A",
+            hr9: stat.homeRunsPer9||"N/A", ip: stat.inningsPitched||"0",
+            hr_allowed: stat.homeRuns||0
           };
         }
       } catch {}
@@ -134,19 +127,15 @@ export default async function handler(req, res) {
       "Chase Field":[33.4453,-112.0667],"Coors Field":[39.7559,-104.9942]
     };
     const coords = Object.entries(venueCoords).find(([k]) =>
-      venue && venue.toLowerCase().includes(k.toLowerCase())
-    )?.[1] || [40.7128,-74.0060];
-
+      venue && venue.toLowerCase().includes(k.toLowerCase()))?.[1] || [40.7128,-74.0060];
     try {
-      const wxRes = await fetch(
-        `https://api.open-meteo.com/v1/forecast?latitude=${coords[0]}&longitude=${coords[1]}&hourly=temperature_2m,windspeed_10m,winddirection_10m&temperature_unit=fahrenheit&windspeed_unit=mph&forecast_days=1&timezone=auto`
-      );
+      const wxRes = await fetch(`https://api.open-meteo.com/v1/forecast?latitude=${coords[0]}&longitude=${coords[1]}&hourly=temperature_2m,windspeed_10m,winddirection_10m&temperature_unit=fahrenheit&windspeed_unit=mph&forecast_days=1&timezone=auto`);
       const wxData = await wxRes.json();
       const idx = 19;
       results.weather = {
-        temp: Math.round(wxData.hourly?.temperature_2m?.[idx] || 70) + "°F",
-        wind_speed: Math.round(wxData.hourly?.windspeed_10m?.[idx] || 5) + " mph",
-        wind_dir: wxData.hourly?.winddirection_10m?.[idx] || 180,
+        temp: Math.round(wxData.hourly?.temperature_2m?.[idx]||70)+"°F",
+        wind_speed: Math.round(wxData.hourly?.windspeed_10m?.[idx]||5)+" mph",
+        wind_dir: wxData.hourly?.winddirection_10m?.[idx]||180,
         summary: `${Math.round(wxData.hourly?.temperature_2m?.[idx]||70)}°F, wind ${Math.round(wxData.hourly?.windspeed_10m?.[idx]||5)} mph`
       };
     } catch {}
