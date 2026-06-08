@@ -1,117 +1,76 @@
 // pages/api/analyzetest.js
-// Visit /api/analyzetest in browser — runs ONE real game through the full
-// pipeline and shows the RAW AI response + where parsing fails.
-// This is read-only diagnosis; it does not change the main app.
+// Runs ONE game through the REAL heavy pipeline (gamedata + analyze) and
+// times each stage. Reveals whether the failure is a timeout, the data
+// layer, or the AI. Visit /api/analyzetest in the browser.
 
 export default async function handler(req, res) {
   res.setHeader("Access-Control-Allow-Origin", "*");
-
-  const GEMINI_KEY = process.env.GEMINI_API_KEY;
-  const CEREBRAS_KEY = process.env.CEREBRAS_API_KEY;
-  const today = new Date().toISOString().split("T")[0];
-  const log = {};
+  const t0 = Date.now();
+  const timing = {};
+  const mark = (label, since) => { timing[label] = (Date.now() - since) + "ms"; };
 
   try {
-    // 1. Get schedule, pick first game with a posted lineup
-    const schedR = await fetch(`https://statsapi.mlb.com/api/v1/schedule?sportId=1&date=${today}&hydrate=probablePitcher,team,venue`);
+    const host = req.headers.host;
+    const proto = host.startsWith("localhost") ? "http" : "https";
+    const base = `${proto}://${host}`;
+    const today = new Date().toISOString().split("T")[0];
+
+    // 1. schedule
+    let s = Date.now();
+    const schedR = await fetch(`${base}/api/schedule`);
     const sched = await schedR.json();
-    const games = [];
-    for (const d of sched.dates || []) for (const g of d.games || []) games.push(g);
-    log.gamesFound = games.length;
+    mark("1_schedule", s);
+    const games = sched.games || [];
+    if (!games.length) return res.status(200).json({ stop:"no games", timing });
 
-    if (!games.length) return res.status(200).json({ ...log, stop: "no games today" });
+    // pick the first game
+    const g = games[0];
+    const result = { testGame: `${g.away_team} @ ${g.home_team}`, timing };
 
-    // find one with a boxscore lineup
-    let chosen = null, lineupAway = [], lineupHome = [];
-    for (const g of games.slice(0, 6)) {
-      try {
-        const bR = await fetch(`https://statsapi.mlb.com/api/v1/game/${g.gamePk}/boxscore`);
-        const b = await bR.json();
-        const ao = b.teams?.away?.battingOrder || [];
-        const ho = b.teams?.home?.battingOrder || [];
-        if (ao.length >= 8 && ho.length >= 8) {
-          chosen = g;
-          const ap = b.teams.away.players, hp = b.teams.home.players;
-          lineupAway = ao.slice(0,9).map((id,i)=>({ name: ap[`ID${id}`]?.person?.fullName, bats: ap[`ID${id}`]?.person?.batSide?.code||"R", spot:i+1 }));
-          lineupHome = ho.slice(0,9).map((id,i)=>({ name: hp[`ID${id}`]?.person?.fullName, bats: hp[`ID${id}`]?.person?.batSide?.code||"R", spot:i+1 }));
-          break;
-        }
-      } catch {}
+    // 2. gamedata (the heavy step — ~60 fetches)
+    s = Date.now();
+    let gameData;
+    try {
+      const gdR = await fetch(`${base}/api/gamedata?game_pk=${g.game_pk}&away_team=${g.away_team}&home_team=${g.home_team}&venue=${encodeURIComponent(g.venue)}&away_sp_id=${g.away_sp.id||""}&home_sp_id=${g.home_sp.id||""}&away_team_id=${g.away_team_id||""}&home_team_id=${g.home_team_id||""}&game_time=${encodeURIComponent(g.time_et||"")}`);
+      result.gamedataStatus = gdR.status;
+      gameData = await gdR.json();
+      mark("2_gamedata", s);
+      result.gamedataError = gameData.error || null;
+      result.lineupsPosted = gameData.lineupsPosted;
+      result.projected = gameData.projected;
+      result.awayLineupCount = (gameData.lineups?.away||[]).length;
+      result.homeLineupCount = (gameData.lineups?.home||[]).length;
+      result.savantUsed = gameData.savantUsed;
+      result.injuredCount = (gameData.injured||[]).length;
+    } catch (e) {
+      mark("2_gamedata_FAILED", s);
+      result.gamedataException = e.message;
+      return res.status(200).json(result);
     }
 
-    if (!chosen) {
-      // fall back to first game, note that no posted lineups exist
-      log.note = "No posted lineups found in first 6 games (early in day). Using a generic prompt to test AI response format only.";
-      lineupAway = [{name:"Test Player A",bats:"R",spot:1},{name:"Test Player B",bats:"L",spot:2},{name:"Test Player C",bats:"R",spot:3}];
-      lineupHome = [{name:"Test Player D",bats:"L",spot:1},{name:"Test Player E",bats:"R",spot:2},{name:"Test Player F",bats:"L",spot:3}];
-      chosen = games[0];
-    }
-
-    const away = chosen.teams?.away?.team?.abbreviation || "AWY";
-    const home = chosen.teams?.home?.team?.abbreviation || "HOM";
-    log.testGame = `${away} @ ${home}`;
-    log.lineupCounts = { away: lineupAway.length, home: lineupHome.length };
-
-    // 2. Build a representative prompt (same shape as analyze.js)
-    const prompt = `You are an MLB HR model. Pick top 4 HR candidates per team.
-${away} @ ${home}
-AWAY: ${lineupAway.map(p=>`${p.spot}.${p.name}(${p.bats})`).join("; ")}
-HOME: ${lineupHome.map(p=>`${p.spot}.${p.name}(${p.bats})`).join("; ")}
-
-Respond ONLY with JSON:
-{"candidates":[{"name":"","team":"","bats":"L","lineup_spot":3,"opposing_sp":"","sp_throws":"R","pitcher_grade":"AVERAGE","batter_grade":"HOT","hr_score":72.4,"hr_prob":"14%","key_stats":[{"label":"HR","value":"4"}],"summary":"x"}]}`;
-
-    // 3. Call whichever provider is configured (prefer Gemini)
-    let raw = "", provider = "", httpStatus = 0, apiError = null, finishReason = "";
-
-    if (GEMINI_KEY) {
-      provider = "gemini-2.5-flash";
-      const r = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${GEMINI_KEY}`, {
+    // 3. analyze
+    s = Date.now();
+    try {
+      const anR = await fetch(`${base}/api/analyze`, {
         method:"POST", headers:{"Content-Type":"application/json"},
-        body: JSON.stringify({ contents:[{parts:[{text:prompt}]}], generationConfig:{ temperature:0.3, maxOutputTokens:4000, responseMimeType:"application/json" } })
+        body: JSON.stringify({ game: g, gameData })
       });
-      httpStatus = r.status;
-      const d = await r.json();
-      apiError = d.error || null;
-      finishReason = d.candidates?.[0]?.finishReason || "";
-      raw = d.candidates?.[0]?.content?.parts?.[0]?.text || "";
-      log.fullGeminiShape = JSON.stringify(d).substring(0, 400);
-    } else if (CEREBRAS_KEY) {
-      provider = "cerebras gpt-oss-120b";
-      const r = await fetch("https://api.cerebras.ai/v1/chat/completions", {
-        method:"POST", headers:{"Content-Type":"application/json","Authorization":`Bearer ${CEREBRAS_KEY}`},
-        body: JSON.stringify({ model:"gpt-oss-120b", messages:[{role:"user",content:prompt}], temperature:0.3, max_completion_tokens:2000, response_format:{type:"json_object"} })
-      });
-      httpStatus = r.status;
-      const d = await r.json();
-      apiError = d.error || d.message || null;
-      finishReason = d.choices?.[0]?.finish_reason || "";
-      raw = d.choices?.[0]?.message?.content || "";
+      result.analyzeStatus = anR.status;
+      const an = await anR.json();
+      mark("3_analyze", s);
+      result.analyzeError = an.error || null;
+      result.analyzeSkipped = an.skipped || false;
+      result.candidateCount = (an.candidates||[]).length;
+      result.sampleCandidate = an.candidates?.[0] || null;
+    } catch (e) {
+      mark("3_analyze_FAILED", s);
+      result.analyzeException = e.message;
     }
 
-    log.provider = provider;
-    log.httpStatus = httpStatus;
-    log.apiError = apiError;
-    log.finishReason = finishReason;
-    log.rawLength = raw.length;
-    log.rawResponse = raw.substring(0, 1500);  // show the actual output
-
-    // 4. Try to parse it
-    let parseResult = "not attempted";
-    if (raw) {
-      try {
-        JSON.parse(raw);
-        parseResult = "✅ PARSED CLEANLY";
-      } catch (e) {
-        parseResult = "❌ PARSE FAILED: " + e.message;
-        // show last 100 chars so we can see if it's truncated
-        log.rawTail = raw.substring(Math.max(0, raw.length - 150));
-      }
-    }
-    log.parseResult = parseResult;
-
-    return res.status(200).json(log);
+    result.totalTime = (Date.now() - t0) + "ms";
+    result.note = "Vercel free-tier function timeout is 10000ms (10s). If any single stage approaches that, that's the bottleneck.";
+    return res.status(200).json(result);
   } catch (e) {
-    return res.status(500).json({ ...log, fatalError: e.message });
+    return res.status(500).json({ fatalError: e.message, timing, totalTime: (Date.now()-t0)+"ms" });
   }
 }
