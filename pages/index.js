@@ -21,11 +21,11 @@ const PGRADE = {
 };
 
 function HBadge({ grade }) {
-  const c = HEAT[grade] || HEAT.AVERAGE;
+  const c = HEAT[normHeat(grade)] || HEAT.AVERAGE;
   return <span style={{ background:c.bg, color:c.color, border:`1px solid ${c.border}`, borderRadius:5, padding:"2px 8px", fontSize:10, fontWeight:800, letterSpacing:"0.06em", fontFamily:"monospace", whiteSpace:"nowrap" }}>{c.label}</span>;
 }
 function PBadge({ grade }) {
-  const c = PGRADE[grade] || PGRADE["AVERAGE"];
+  const c = PGRADE[normPitch(grade)] || PGRADE["AVERAGE"];
   return <span style={{ background:c.bg, color:c.color, border:`1px solid ${c.border}`, borderRadius:4, padding:"1px 7px", fontSize:9, fontWeight:800, fontFamily:"monospace", whiteSpace:"nowrap" }}>{c.label}</span>;
 }
 
