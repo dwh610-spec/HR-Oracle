@@ -72,10 +72,14 @@ grades: pitcher=BATTING PRACTICE|AVERAGE|STUD batter=FIRE|HOT|AVERAGE|COLD`;
 
       const cbData = await cbRes.json();
 
-      const transient = cbData.message && /high traffic|try again|rate limit|capacity|busy/i.test(cbData.message);
-      if (transient || cbRes.status === 429 || cbRes.status === 503) {
-        lastErr = "busy: " + (cbData.message || cbRes.status);
-        await sleep(attempt * 3000);
+      const msgText = cbData.message || "";
+      const isRateLimit = /requests per minute|rate limit|too many requests/i.test(msgText) || cbRes.status === 429;
+      const isCapacity = /high traffic|try again|capacity|busy/i.test(msgText) || cbRes.status === 503;
+      if (isRateLimit || isCapacity) {
+        lastErr = "busy: " + (msgText || cbRes.status);
+        // Rate-limit needs a longer wait (limit window); capacity a shorter one
+        const wait = isRateLimit ? 8000 + attempt * 4000 : attempt * 3000;
+        await sleep(wait);
         continue;
       }
       if (cbData.error || cbData.message) {
