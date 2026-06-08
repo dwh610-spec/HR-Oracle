@@ -203,11 +203,12 @@ export default function HROracle() {
         if (i > 0) await new Promise(r => setTimeout(r, 4500));
 
         try {
-          // Fetch live lineups, stats, weather (team IDs needed for injury lookup)
+          // Fetch live lineups, stats, weather (team IDs + time for splits)
           const gdRes = await fetch(
-            `/api/gamedata?game_pk=${g.game_pk}&away_team=${g.away_team}&home_team=${g.home_team}&venue=${encodeURIComponent(g.venue)}&away_sp_id=${g.away_sp.id||""}&home_sp_id=${g.home_sp.id||""}&away_team_id=${g.away_team_id||""}&home_team_id=${g.home_team_id||""}`
+            `/api/gamedata?game_pk=${g.game_pk}&away_team=${g.away_team}&home_team=${g.home_team}&venue=${encodeURIComponent(g.venue)}&away_sp_id=${g.away_sp.id||""}&home_sp_id=${g.home_sp.id||""}&away_team_id=${g.away_team_id||""}&home_team_id=${g.home_team_id||""}&game_time=${encodeURIComponent(g.time_et||"")}`
           );
           const gameData = await gdRes.json();
+          if (gameData.error) throw new Error("data: " + gameData.error);
 
           // If no lineup AND no projection possible, mark pending
           if (!gameData.lineupsPosted && !gameData.projected) {
@@ -224,6 +225,7 @@ export default function HROracle() {
           if (anData.error) throw new Error(anData.error);
 
           if (anData.skipped) {
+            // Not an error — just no lineup/roster data
             setPendingGames(prev => [...prev, g]);
           } else if (Array.isArray(anData.candidates) && anData.candidates.length) {
             allResults.push(...anData.candidates);
@@ -232,7 +234,7 @@ export default function HROracle() {
             setPendingGames(prev => [...prev, g]);
           }
         } catch(e) {
-          errs.push(`${g.away_team}@${g.home_team}: ${e.message.substring(0,50)}`);
+          errs.push(`${g.away_team}@${g.home_team}: ${e.message.substring(0,140)}`);
         }
       }
 
@@ -315,7 +317,26 @@ export default function HROracle() {
           {/* Errors */}
           {errors.length > 0 && (
             <div style={{ background:"rgba(239,68,68,0.07)", border:"1px solid rgba(239,68,68,0.2)", borderRadius:10, padding:"12px 14px", marginBottom:16, fontSize:12, color:"#f87171" }}>
-              {!batters.length?`⚠️ ${errors[0]}`:`⚠️ ${errors.length} game(s) had issues — showing results for the rest.`}
+              {!batters.length ? (
+                <div>⚠️ {errors[0]}</div>
+              ) : (
+                <>
+                  <div style={{ fontWeight:700, marginBottom:8 }}>⚠️ {errors.length} game(s) had issues — showing results for the rest:</div>
+                  <div style={{ display:"flex", flexDirection:"column", gap:4 }}>
+                    {errors.map((e, i) => {
+                      const colonIdx = e.indexOf(":");
+                      const matchup = colonIdx > 0 ? e.slice(0, colonIdx) : e;
+                      const reason = colonIdx > 0 ? e.slice(colonIdx + 1).trim() : "";
+                      return (
+                        <div key={i} style={{ fontSize:11, fontFamily:"monospace", color:"#fca5a5", background:"rgba(239,68,68,0.06)", borderRadius:5, padding:"5px 9px" }}>
+                          <span style={{ fontWeight:700, color:"#f87171" }}>{matchup}</span>
+                          {reason ? <span style={{ color:"#94a3b8" }}> — {reason}</span> : null}
+                        </div>
+                      );
+                    })}
+                  </div>
+                </>
+              )}
             </div>
           )}
 
