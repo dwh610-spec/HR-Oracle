@@ -199,9 +199,9 @@ export default function HROracle() {
         const g = fetchedGames[i];
         setStatus(`Analyzing ${g.away_team} @ ${g.home_team} (${i+1}/${fetchedGames.length})…`);
 
-        // Throttle: Cerebras free tier = 30 req/min (1 every 2s). With retries
-        // stacking, we space games ~5s apart to stay safely under the limit.
-        if (i > 0) await new Promise(r => setTimeout(r, 5000));
+        // Throttle: Gemini free tier = ~10 req/min (1 every 6s). Space games
+        // 7s apart to stay safely under the limit.
+        if (i > 0) await new Promise(r => setTimeout(r, 7000));
 
         try {
           // Fetch live lineups, stats, weather (team IDs + time for splits)
@@ -420,4 +420,3 @@ export default function HROracle() {
     </>
   );
 }
-                
