@@ -31,7 +31,56 @@ export default async function handler(req, res) {
   out.gemini.keyLength = gKey.length;
   out.gemini.hadWhitespace = gKeyRaw !== gKey;
 
+  const orKeyRaw = process.env.OPENROUTER_API_KEY || "";
+  const orKey = orKeyRaw.trim();
+  out.openrouter = {
+    keyPresent: !!orKey,
+    keyLength: orKey.length,
+    keyPrefix: orKey ? orKey.slice(0, 8) : "(none)",
+    hadWhitespace: orKeyRaw !== orKey
+  };
+
   const tinyPrompt = 'Reply with this exact JSON and nothing else: {"ok":true}';
+
+  // ── Test OpenRouter ───────────────────────────────────────────────────
+  if (orKey) {
+    const orModel = "meta-llama/llama-3.3-70b-instruct:free";
+    try {
+      const r = await fetchWithTimeout("https://openrouter.ai/api/v1/chat/completions", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "Authorization": `Bearer ${orKey}`,
+          "HTTP-Referer": "https://hr-oracle.vercel.app",
+          "X-Title": "HR Oracle"
+        },
+        body: JSON.stringify({
+          model: orModel,
+          max_tokens: 50,
+          response_format: { type: "json_object" },
+          messages: [{ role: "user", content: tinyPrompt }]
+        })
+      }, 25000);
+      out.openrouter.httpStatus = r.status;
+      out.openrouter.model = orModel;
+      let data; try { data = await r.json(); } catch { data = null; }
+      if (data?.error) {
+        out.openrouter.result = (r.status === 429) ? "RATE-LIMITED (429)" : "ERROR";
+        out.openrouter.detail = (data.error.message || JSON.stringify(data.error)).slice(0, 200);
+      } else if (data?.choices?.[0]?.message?.content || data?.choices?.[0]?.message?.reasoning) {
+        out.openrouter.result = "SUCCESS ✅";
+        out.openrouter.sample = (data.choices[0].message.content || data.choices[0].message.reasoning).slice(0, 60);
+      } else {
+        out.openrouter.result = "UNEXPECTED";
+        out.openrouter.detail = JSON.stringify(data).slice(0, 200);
+      }
+    } catch (e) {
+      out.openrouter.result = "THREW";
+      out.openrouter.detail = e.name === "AbortError" ? "timed out (25s)" : e.message.slice(0, 200);
+    }
+  } else {
+    out.openrouter.result = "NO KEY — not set in Vercel env vars";
+  }
 
   // ── Test Cerebras ─────────────────────────────────────────────────────
   if (cKey) {
@@ -106,9 +155,11 @@ export default async function handler(req, res) {
   const cOk = out.cerebras.result === "SUCCESS ✅";
   const gLiteOk = out.gemini["gemini-2.5-flash-lite"]?.result === "SUCCESS ✅";
   const gFlashOk = out.gemini["gemini-2.5-flash"]?.result === "SUCCESS ✅";
-  if (cOk) out.VERDICT = "Cerebras works — the main app should now succeed via Cerebras.";
-  else if (gLiteOk || gFlashOk) out.VERDICT = "Cerebras is down but Gemini works — app should succeed via Gemini.";
-  else out.VERDICT = "Both providers failing. See detail fields above for the exact reason per provider.";
+  const orOk = out.openrouter.result === "SUCCESS ✅";
+  if (orOk) out.VERDICT = "OpenRouter works — the app should succeed via OpenRouter (first in chain).";
+  else if (gLiteOk || gFlashOk) out.VERDICT = "OpenRouter down but Gemini works — app should succeed via Gemini.";
+  else if (cOk) out.VERDICT = "Only Cerebras works — app should succeed via Cerebras fallback.";
+  else out.VERDICT = "All providers failing. See detail fields above for the exact reason per provider.";
 
   return res.status(200).json(out);
 }
