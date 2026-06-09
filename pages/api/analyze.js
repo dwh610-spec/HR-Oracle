@@ -173,7 +173,7 @@ async function callGemini(model, prompt, key) {
 // ── OpenRouter ───────────────────────────────────────────────────────────────
 // OpenAI-compatible endpoint. Free models have large context windows, so the
 // whole slate goes in one call. `model` is an OpenRouter model slug.
-async function callOpenRouter(model, prompt, key) {
+async function callOpenRouter(model, prompt, key, timeoutMs) {
   const cleanKey = (key || "").trim();
   let r;
   try {
@@ -192,7 +192,7 @@ async function callOpenRouter(model, prompt, key) {
         response_format: { type: "json_object" },
         messages: [{ role:"user", content: prompt }]
       })
-    }, 50000);
+    }, timeoutMs || 50000);
   } catch(e) {
     if (e.name === "AbortError") return { ok:false, kind:"timeout", msg:`OR ${model} timed out` };
     return { ok:false, kind:"network", msg:`OR ${model}: ${e.message}` };
@@ -283,60 +283,52 @@ export default async function handler(req, res) {
 
   let lastMsg = "";
 
+  // Global deadline: Vercel kills the function at 60s. Track a budget so we
+  // always reserve time to fall through to a fast provider and return something.
+  const startedAt = Date.now();
+  const elapsed = () => Date.now() - startedAt;
+  const timeLeft = () => 58000 - elapsed();
+
   // ── Provider 1: OpenRouter (fresh quota tonight, large context = one call) ──
-  // Tries several free models in order; if one is busy/limited it falls to the
-  // next. All are free slugs (":free").
-  if (OPENROUTER_KEY) {
+  // Fail FAST: try just ONE fast free model with a short timeout. Slow free
+  // models cause server timeouts, so we don't grind through four of them — if
+  // the first doesn't answer quickly we move on to Gemini (known to be fast).
+  if (OPENROUTER_KEY && timeLeft() > 30000) {
     const prompt = buildPrompt(blocks);
-    const orModels = [
-      "meta-llama/llama-3.3-70b-instruct:free",
-      "deepseek/deepseek-chat:free",
-      "qwen/qwen-2.5-72b-instruct:free",
-      "google/gemma-2-9b-it:free"
-    ];
-    for (const model of orModels) {
-      for (let attempt = 1; attempt <= 2; attempt++) {
-        const r = await callOpenRouter(model, prompt, OPENROUTER_KEY);
-        if (r.ok) return finalize(r.candidates, "openrouter:" + model.split("/").pop());
-        lastMsg = r.msg;
-        if (["busy","empty","unparseable","network"].includes(r.kind) && attempt < 2) {
-          await sleep(3000); continue;
-        }
-        break; // rate/timeout/api/toobig on this model → try next model
-      }
-    }
+    // Single attempt, single model. callOpenRouter has its own 50s cap, but we
+    // pass a tighter budget so it can't eat the whole window.
+    const r = await callOpenRouter("meta-llama/llama-3.3-70b-instruct:free", prompt, OPENROUTER_KEY, Math.min(28000, timeLeft() - 20000));
+    if (r.ok) return finalize(r.candidates, "openrouter:llama-3.3-70b");
+    lastMsg = r.msg;
   }
 
   // ── Provider 3: Gemini flash-lite (confirmed working, one clean batch call) ──
   // flash-lite has the most generous free tier (15 RPM, 1000/day) and 1M context,
   // so the whole slate goes in one request — no splitting.
-  if (GEMINI_KEY) {
+  if (GEMINI_KEY && timeLeft() > 15000) {
     const prompt = buildPrompt(blocks);
     for (const model of ["gemini-2.5-flash-lite", "gemini-2.5-flash"]) {
-      for (let attempt = 1; attempt <= 2; attempt++) {
-        const r = await callGemini(model, prompt, GEMINI_KEY);
-        if (r.ok) return finalize(r.candidates, model);
-        lastMsg = r.msg;
-        if (["busy","empty","unparseable","network"].includes(r.kind) && attempt < 2) {
-          await sleep(5000); continue;
-        }
-        break; // rate/timeout/api on this model → try next model, then Cerebras
-      }
+      if (timeLeft() < 12000) break;
+      const r = await callGemini(model, prompt, GEMINI_KEY);
+      if (r.ok) return finalize(r.candidates, model);
+      lastMsg = r.msg;
+      // No long in-model retries here — falling to the next model/provider is
+      // faster and safer than sleeping inside our shrinking time budget.
     }
   }
 
   // ── Provider 4: Cerebras (fallback). Split into chunks that fit its context. ──
-  if (CEREBRAS_KEY) {
+  // Only attempt if we have real time left — its chunked calls are the slowest.
+  if (CEREBRAS_KEY && timeLeft() > 18000) {
     const allChunks = chunkForCerebras(blocks);
-    // With throttling each chunk can take several seconds; cap how many we try
-    // so the whole function stays under Vercel's 60s limit. Partial results beat
-    // a timeout that returns nothing.
+    // Cap chunks by BOTH a hard limit and remaining time so we never overrun.
     const MAX_CHUNKS = 5;
     const chunks = allChunks.slice(0, MAX_CHUNKS);
     const collected = [];
     let cerebrasOk = true;
 
     for (let i = 0; i < chunks.length; i++) {
+      if (timeLeft() < 12000) { cerebrasOk = false; break; } // bail with partial
       // Space calls out: Cerebras free tier is ~1 request/second. Pausing
       // before every chunk after the first keeps us under that limit.
       if (i > 0) await sleep(1300);
@@ -353,10 +345,10 @@ export default async function handler(req, res) {
           i--; chunkDone = true; break; // reprocess from the new smaller chunk
         }
         // Rate-limited: back off and retry this same chunk (don't abandon).
-        if (r.kind === "rate" && attempt < 3) {
+        if (r.kind === "rate" && attempt < 3 && timeLeft() > 14000) {
           await sleep(2500 * attempt); continue;
         }
-        if (["busy","empty","unparseable","network"].includes(r.kind) && attempt < 3) {
+        if (["busy","empty","unparseable","network"].includes(r.kind) && attempt < 3 && timeLeft() > 14000) {
           await sleep(2500); continue;
         }
         break;
