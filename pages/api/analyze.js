@@ -83,11 +83,15 @@ function extractCandidates(rawText) {
 // Free tier: 8,192-token context. Param is max_completion_tokens. JSON mode
 // via response_format. Only gpt-oss-120b / zai-glm-4.7 available on this key.
 async function callCerebras(prompt, key) {
+  // Strip any stray whitespace/newlines from the env var — a trailing space or
+  // line break makes the Authorization header an invalid string and fetch throws
+  // "The string did not match the expected pattern" before the request is sent.
+  const cleanKey = (key || "").trim();
   let r;
   try {
     r = await fetchWithTimeout("https://api.cerebras.ai/v1/chat/completions", {
       method:"POST",
-      headers:{ "Content-Type":"application/json", "Authorization":`Bearer ${key}` },
+      headers:{ "Content-Type":"application/json", "Authorization":`Bearer ${cleanKey}` },
       body: JSON.stringify({
         model: "gpt-oss-120b",
         max_completion_tokens: 3000,
@@ -130,7 +134,8 @@ async function callCerebras(prompt, key) {
 
 // ── Gemini ─────────────────────────────────────────────────────────────────
 async function callGemini(model, prompt, key) {
-  const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${key}`;
+  const cleanKey = encodeURIComponent((key || "").trim());
+  const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${cleanKey}`;
   let r;
   try {
     r = await fetchWithTimeout(url, {
