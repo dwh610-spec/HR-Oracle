@@ -94,7 +94,7 @@ async function callCerebras(prompt, key) {
       headers:{ "Content-Type":"application/json", "Authorization":`Bearer ${cleanKey}` },
       body: JSON.stringify({
         model: "gpt-oss-120b",
-        max_completion_tokens: 3000,
+        max_completion_tokens: 5000,
         temperature: 0.3,
         response_format: { type: "json_object" },
         messages: [{ role:"user", content: prompt }]
@@ -120,12 +120,16 @@ async function callCerebras(prompt, key) {
   }
   if (data?.error) return { ok:false, kind:"api", msg:"Cerebras: "+(data.error.message||"").substring(0,80) };
 
-  const text = data?.choices?.[0]?.message?.content || "";
+  // gpt-oss-120b is a reasoning model: the JSON answer is in message.content,
+  // but if it runs low on tokens the parseable JSON can end up in `reasoning`.
+  // Check content first, then reasoning as a fallback.
+  const msg = data?.choices?.[0]?.message || {};
+  const text = msg.content || msg.reasoning || "";
   const finish = data?.choices?.[0]?.finish_reason || "";
   if (!text) return { ok:false, kind:"empty", msg:"Cerebras empty" };
-  // If it ran out of room mid-JSON, treat as too-big so we split.
   const cands = extractCandidates(text);
   if (!cands) {
+    // Ran out of room before producing valid JSON → split the slate smaller.
     if (finish === "length") return { ok:false, kind:"toobig", msg:"Cerebras truncated (length)" };
     return { ok:false, kind:"unparseable", msg:"Cerebras unparseable" };
   }
@@ -167,10 +171,11 @@ async function callGemini(model, prompt, key) {
 }
 
 // Split blocks into chunks whose prompt fits Cerebras's context budget.
-// Budget for INPUT ~4,800 tokens (leaves room for the 3,000-token completion
-// within the 8,192 cap).
+// gpt-oss-120b caps total context at 8,192 tokens AND reserves a big chunk for
+// reasoning + answer (we allow 5,000 for completion). So keep INPUT small —
+// ~2,600 tokens — which is roughly 2-3 games per chunk.
 function chunkForCerebras(blocks) {
-  const BUDGET = 4800;
+  const BUDGET = 2600;
   const overhead = estTokens(INSTRUCTIONS_HEAD) + estTokens(INSTRUCTIONS_TAIL) + 50;
   const chunks = [];
   let cur = [], curTok = overhead;
@@ -222,7 +227,25 @@ export default async function handler(req, res) {
 
   let lastMsg = "";
 
-  // ── Provider 1: Cerebras (proven). Split into chunks that fit its context. ──
+  // ── Provider 1: Gemini flash-lite (confirmed working, one clean batch call) ──
+  // flash-lite has the most generous free tier (15 RPM, 1000/day) and 1M context,
+  // so the whole slate goes in one request — no splitting.
+  if (GEMINI_KEY) {
+    const prompt = buildPrompt(blocks);
+    for (const model of ["gemini-2.5-flash-lite", "gemini-2.5-flash"]) {
+      for (let attempt = 1; attempt <= 2; attempt++) {
+        const r = await callGemini(model, prompt, GEMINI_KEY);
+        if (r.ok) return finalize(r.candidates, model);
+        lastMsg = r.msg;
+        if (["busy","empty","unparseable","network"].includes(r.kind) && attempt < 2) {
+          await sleep(5000); continue;
+        }
+        break; // rate/timeout/api on this model → try next model, then Cerebras
+      }
+    }
+  }
+
+  // ── Provider 2: Cerebras (fallback). Split into chunks that fit its context. ──
   if (CEREBRAS_KEY) {
     const chunks = chunkForCerebras(blocks);
     const collected = [];
@@ -243,29 +266,12 @@ export default async function handler(req, res) {
         if (["busy","empty","unparseable","network"].includes(r.kind) && attempt < 2) {
           await sleep(3000); continue;
         }
-        break; // rate/timeout/api → abandon Cerebras, go to Gemini
+        break;
       }
       if (!chunkDone) { cerebrasOk = false; break; }
     }
 
     if (cerebrasOk && collected.length) return finalize(collected, "cerebras");
-    // else fall through to Gemini
-  }
-
-  // ── Provider 2 & 3: Gemini (single batch call; 1M context, no split needed) ──
-  if (GEMINI_KEY) {
-    const prompt = buildPrompt(blocks);
-    for (const model of ["gemini-2.5-flash-lite", "gemini-2.5-flash"]) {
-      for (let attempt = 1; attempt <= 2; attempt++) {
-        const r = await callGemini(model, prompt, GEMINI_KEY);
-        if (r.ok) return finalize(r.candidates, model);
-        lastMsg = r.msg;
-        if (["busy","empty","unparseable","network"].includes(r.kind) && attempt < 2) {
-          await sleep(5000); continue;
-        }
-        break;
-      }
-    }
   }
 
   return res.status(200).json({ candidates: [], reason: lastMsg || "all providers failed — wait a minute and refresh" });
