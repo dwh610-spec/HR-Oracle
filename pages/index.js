@@ -20,6 +20,24 @@ const PGRADE = {
   "STUD":             { label:"🔴 STUD", color:"#ef4444", bg:"rgba(239,68,68,0.12)",  border:"rgba(239,68,68,0.3)"  },
 };
 
+// Normalize whatever casing/spacing the AI returns to a known grade key.
+// Falls back to AVERAGE so a stray value can never break rendering.
+function normHeat(grade) {
+  const g = String(grade || "").trim().toUpperCase();
+  if (HEAT[g]) return g;
+  if (g.includes("FIRE")) return "FIRE";
+  if (g.includes("HOT")) return "HOT";
+  if (g.includes("COLD")) return "COLD";
+  return "AVERAGE";
+}
+function normPitch(grade) {
+  const g = String(grade || "").trim().toUpperCase();
+  if (PGRADE[g]) return g;
+  if (g.includes("BATTING") || g.includes("BP") || g.includes("PRACTICE")) return "BATTING PRACTICE";
+  if (g.includes("STUD") || g.includes("ACE")) return "STUD";
+  return "AVERAGE";
+}
+
 function HBadge({ grade }) {
   const c = HEAT[normHeat(grade)] || HEAT.AVERAGE;
   return <span style={{ background:c.bg, color:c.color, border:`1px solid ${c.border}`, borderRadius:5, padding:"2px 8px", fontSize:10, fontWeight:800, letterSpacing:"0.06em", fontFamily:"monospace", whiteSpace:"nowrap" }}>{c.label}</span>;
@@ -46,7 +64,7 @@ function Dial({ score, size=50, fs=11 }) {
 }
 
 function Row({ rank, b, selected, onClick }) {
-  const heat = HEAT[b.batter_grade] || HEAT.AVERAGE;
+  const heat = HEAT[normHeat(b.batter_grade)] || HEAT.AVERAGE;
   return (
     <div onClick={onClick} style={{ display:"flex", alignItems:"center", gap:10, padding:"12px 14px", background:selected?"rgba(249,115,22,0.09)":"rgba(255,255,255,0.025)", border:`1px solid ${selected?"rgba(249,115,22,0.45)":"rgba(255,255,255,0.07)"}`, borderRadius:12, cursor:"pointer", marginBottom:7, WebkitTapHighlightColor:"transparent" }}>
       <div style={{ width:22, textAlign:"center", flexShrink:0, fontSize:rank<=3?15:12, fontWeight:700, fontFamily:"monospace", color:rank===1?"#f97316":rank===2?"#eab308":rank===3?"#94a3b8":"#334155" }}>
@@ -84,8 +102,8 @@ function Row({ rank, b, selected, onClick }) {
 
 function Modal({ b, onClose }) {
   if (!b) return null;
-  const heat = HEAT[b.batter_grade] || HEAT.AVERAGE;
-  const pg = PGRADE[b.pitcher_grade] || PGRADE["AVERAGE"];
+  const heat = HEAT[normHeat(b.batter_grade)] || HEAT.AVERAGE;
+  const pg = PGRADE[normPitch(b.pitcher_grade)] || PGRADE["AVERAGE"];
   return (
     <div onClick={onClose} style={{ position:"fixed", inset:0, background:"rgba(0,0,0,0.85)", display:"flex", alignItems:"center", justifyContent:"center", zIndex:200, padding:16 }}>
       <div onClick={e=>e.stopPropagation()} style={{ background:"linear-gradient(160deg,#0f172a,#060d1a)", border:"1px solid rgba(255,255,255,0.12)", borderRadius:20, padding:24, maxWidth:500, width:"100%", maxHeight:"88vh", overflowY:"auto", boxShadow:"0 20px 80px rgba(0,0,0,0.8)" }}>
