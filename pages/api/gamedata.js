@@ -201,10 +201,19 @@ export default async function handler(req, res) {
 
     if (results.projected) {
       for (const side of ["away","home"]) {
-        results.lineups[side] = (results.lineups[side]||[])
-          .filter(p => (playerStats[p.id]?.ab||0) >= 30)
-          .sort((a,b) => parseFloat(playerStats[b.id]?.recent_ops||playerStats[b.id]?.ops||0) - parseFloat(playerStats[a.id]?.recent_ops||playerStats[a.id]?.ops||0))
-          .slice(0, 9);
+        const roster = results.lineups[side] || [];
+        const byOps = (a,b) => parseFloat(playerStats[b.id]?.recent_ops||playerStats[b.id]?.ops||0) - parseFloat(playerStats[a.id]?.recent_ops||playerStats[a.id]?.ops||0);
+        // Try progressively looser AB thresholds so we never end up empty
+        // just because early-season AB data is sparse for some hitters.
+        let picked = [];
+        for (const minAB of [30, 15, 5, 0]) {
+          picked = roster.filter(p => (playerStats[p.id]?.ab||0) >= minAB).sort(byOps);
+          if (picked.length >= 8) break;
+        }
+        // Final fallback: if stats never populated at all, just take the
+        // roster in the order MLB returned it so projection still works.
+        if (picked.length < 8) picked = roster.slice();
+        results.lineups[side] = picked.slice(0, 9).map((p,i) => ({ ...p, lineup_spot: i+1 }));
       }
     }
 
@@ -242,10 +251,6 @@ export default async function handler(req, res) {
       };
     } catch {}
 
-results.lineupsPosted = (results.source !== "roster");
-    results.projected = (results.source === "roster") &&
-      ((results.lineups.away && results.lineups.away.length > 0) ||
-       (results.lineups.home && results.lineups.home.length > 0));
     return res.status(200).json(results);
   } catch (e) {
     return res.status(500).json({ error: e.message });
