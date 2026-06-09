@@ -255,13 +255,22 @@ export default async function handler(req, res) {
 
   // ── Provider 2: Cerebras (fallback). Split into chunks that fit its context. ──
   if (CEREBRAS_KEY) {
-    const chunks = chunkForCerebras(blocks);
+    const allChunks = chunkForCerebras(blocks);
+    // With throttling each chunk can take several seconds; cap how many we try
+    // so the whole function stays under Vercel's 60s limit. Partial results beat
+    // a timeout that returns nothing.
+    const MAX_CHUNKS = 5;
+    const chunks = allChunks.slice(0, MAX_CHUNKS);
     const collected = [];
     let cerebrasOk = true;
 
     for (let i = 0; i < chunks.length; i++) {
+      // Space calls out: Cerebras free tier is ~1 request/second. Pausing
+      // before every chunk after the first keeps us under that limit.
+      if (i > 0) await sleep(1300);
+
       let chunkDone = false;
-      for (let attempt = 1; attempt <= 2; attempt++) {
+      for (let attempt = 1; attempt <= 3; attempt++) {
         const r = await callCerebras(buildPrompt(chunks[i]), CEREBRAS_KEY);
         if (r.ok) { collected.push(...r.candidates); chunkDone = true; break; }
         lastMsg = r.msg;
@@ -271,15 +280,21 @@ export default async function handler(req, res) {
           chunks.splice(i, 1, chunks[i].slice(0,mid), chunks[i].slice(mid));
           i--; chunkDone = true; break; // reprocess from the new smaller chunk
         }
-        if (["busy","empty","unparseable","network"].includes(r.kind) && attempt < 2) {
-          await sleep(3000); continue;
+        // Rate-limited: back off and retry this same chunk (don't abandon).
+        if (r.kind === "rate" && attempt < 3) {
+          await sleep(2500 * attempt); continue;
+        }
+        if (["busy","empty","unparseable","network"].includes(r.kind) && attempt < 3) {
+          await sleep(2500); continue;
         }
         break;
       }
       if (!chunkDone) { cerebrasOk = false; break; }
     }
 
-    if (cerebrasOk && collected.length) return finalize(collected, "cerebras");
+    // Return whatever we collected, even if some chunks failed or were capped —
+    // partial HR picks are far more useful than an error screen.
+    if (collected.length) return finalize(collected, cerebrasOk ? "cerebras" : "cerebras (partial)");
   }
 
   return res.status(200).json({ candidates: [], reason: lastMsg || "all providers failed — wait a minute and refresh" });
