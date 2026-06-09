@@ -192,7 +192,15 @@ export default async function handler(req, res) {
   res.setHeader("Access-Control-Allow-Origin", "*");
   if (req.method !== "POST") return res.status(405).json({ error: "POST only" });
 
-  const { games } = req.body;
+ try {
+  // req.body can arrive as an object (normal) OR an unparsed string (depending
+  // on how the request is sent / Vercel's body parsing). Handle both so a bad
+  // body never crashes the function into a non-JSON "An error occurred" page.
+  let body = req.body;
+  if (typeof body === "string") {
+    try { body = JSON.parse(body); } catch { body = {}; }
+  }
+  const games = body?.games;
   const CEREBRAS_KEY = process.env.CEREBRAS_API_KEY;
   const GEMINI_KEY = process.env.GEMINI_API_KEY;
   if (!CEREBRAS_KEY && !GEMINI_KEY)
@@ -275,4 +283,8 @@ export default async function handler(req, res) {
   }
 
   return res.status(200).json({ candidates: [], reason: lastMsg || "all providers failed — wait a minute and refresh" });
+ } catch (e) {
+   // Never let an unexpected throw become a non-JSON Vercel crash page.
+   return res.status(200).json({ candidates: [], reason: "Analyzer error: " + (e?.message || "unknown").substring(0,150) });
+ }
 }
