@@ -1,10 +1,9 @@
 // pages/api/gamedata.js
-// v6: adds recent 14-day form, day/night & handedness splits, fatigue flag,
-// ballpark elevation, and Savant power metrics (with game-log fallback)
+// v7: Savant logic INLINED (no internal API-to-API call, which was failing).
+// recent 14-day form, day/night & handedness splits, elevation, power metrics
 
 const BASE = "https://statsapi.mlb.com/api/v1";
 
-// Ballpark elevation (feet) — higher = more carry = more HR
 const VENUE_ELEV = {
   "Coors Field": 5200, "Chase Field": 1059, "Truist Park": 1050,
   "Kauffman Stadium": 750, "Great American Ball Park": 550, "PNC Park": 730,
@@ -17,7 +16,7 @@ const VENUE_ELEV = {
   "Citizens Bank Park": 40, "Nationals Park": 25, "Camden Yards": 50,
   "Oriole Park at Camden Yards": 50, "Rogers Centre": 250, "Tropicana Field": 15,
   "loanDepot park": 10, "Progressive Field": 660, "Sutter Health Park": 30,
-  "George M. Steinbrenner Field": 10
+  "George M. Steinbrenner Field": 10, "Las Vegas Ballpark": 2030
 };
 
 const VENUE_COORDS = {
@@ -37,18 +36,57 @@ const VENUE_COORDS = {
   "Oriole Park at Camden Yards":[39.2838,-76.6217],"Camden Yards":[39.2838,-76.6217],
   "Rogers Centre":[43.6414,-79.3894],"Tropicana Field":[27.7682,-82.6534],
   "George M. Steinbrenner Field":[27.9786,-82.5069],"Sutter Health Park":[38.5804,-121.5005],
-  "Chase Field":[33.4453,-112.0667],"Coors Field":[39.7559,-104.9942]
+  "Chase Field":[33.4453,-112.0667],"Coors Field":[39.7559,-104.9942],
+  "Las Vegas Ballpark":[36.1318,-115.1505]
 };
 
-function daysAgoISO(n) {
-  const d = new Date(); d.setDate(d.getDate() - n);
-  return d.toISOString().split("T")[0];
+// ── Module-level Savant cache (persists across warm invocations) ────────
+let SAVANT_CACHE = { ts: 0, data: null };
+
+async function getSavant() {
+  if (SAVANT_CACHE.data && Date.now() - SAVANT_CACHE.ts < 10 * 60 * 1000) {
+    return SAVANT_CACHE.data;
+  }
+  const year = new Date().getFullYear();
+  const players = {};
+  try {
+    const url = `https://baseballsavant.mlb.com/leaderboard/statcast?type=batter&year=${year}&position=&team=&min=q&csv=true`;
+    const r = await fetch(url, { headers: { "User-Agent": "Mozilla/5.0" } });
+    const text = await r.text();
+    const lines = text.split("\n").filter(l => l.trim());
+    if (lines.length > 1) {
+      const headers = lines[0].split(",").map(h => h.replace(/"/g, "").trim().toLowerCase());
+      const iName = headers.findIndex(h => h.includes("name")) >= 0 ? headers.findIndex(h => h.includes("name")) : 0;
+      const iBarrel = headers.findIndex(h => h.includes("barrel") && (h.includes("pa")||h.includes("rate")) || h==="brl_percent");
+      const iHard = headers.findIndex(h => h.includes("hard"));
+      const iEV = headers.findIndex(h => h.includes("exit_velocity")||h.includes("hit_speed")||h.includes("launch_speed"));
+      const iLA = headers.findIndex(h => h.includes("launch_angle")||h.includes("avg_angle"));
+      for (let i = 1; i < lines.length; i++) {
+        const cols = lines[i].match(/("([^"]*)"|[^,]+)/g) || [];
+        const clean = cols.map(c => c.replace(/"/g, "").trim());
+        let name = clean[iName] || "";
+        if (name.includes(",")) { const [last, first] = name.split(",").map(s=>s.trim()); name = `${first} ${last}`; }
+        if (!name) continue;
+        players[name.toLowerCase()] = {
+          barrel_pct: iBarrel>=0 ? clean[iBarrel] : null,
+          hard_hit_pct: iHard>=0 ? clean[iHard] : null,
+          avg_ev: iEV>=0 ? clean[iEV] : null,
+          launch_angle: iLA>=0 ? clean[iLA] : null
+        };
+      }
+    }
+    SAVANT_CACHE = { ts: Date.now(), data: players };
+  } catch {
+    // fail-safe: empty map, app falls back to game-log power proxy
+  }
+  return players;
 }
+
+function daysAgoISO(n){ const d=new Date(); d.setDate(d.getDate()-n); return d.toISOString().split("T")[0]; }
 
 export default async function handler(req, res) {
   res.setHeader("Access-Control-Allow-Origin", "*");
-  const { game_pk, venue, away_sp_id, home_sp_id, away_team_id, home_team_id,
-          game_time, savant_host } = req.query;
+  const { game_pk, venue, away_sp_id, home_sp_id, away_team_id, home_team_id, game_time } = req.query;
 
   try {
     const results = {
@@ -58,13 +96,12 @@ export default async function handler(req, res) {
       isNightGame: false, savantUsed: false
     };
 
-    // Determine day vs night from game_time (ET hour)
     const hour = parseInt((game_time||"").match(/(\d+):/)?.[1] || "19");
     const isPM = /PM/i.test(game_time||"");
     const h24 = isPM && hour !== 12 ? hour + 12 : hour;
     results.isNightGame = h24 >= 17;
 
-    // ── Injuries ──────────────────────────────────────────────────────
+    // Injuries
     const INJURY_CODES = ["D7","D10","D15","D60","DTD","IL","IL7","IL10","IL15","IL60","RM","BRV","PL","SU","RES","DEC","FME"];
     const injuredIds = new Set(); const injuredNames = [];
     async function loadInjuries(teamId) {
@@ -85,7 +122,7 @@ export default async function handler(req, res) {
     await Promise.all([loadInjuries(away_team_id), loadInjuries(home_team_id)]);
     results.injured = injuredNames;
 
-    // ── Posted lineup ─────────────────────────────────────────────────
+    // Posted lineup
     let aCount=0, hCount=0;
     if (game_pk) {
       try {
@@ -108,7 +145,7 @@ export default async function handler(req, res) {
     }
     results.lineupsPosted = (aCount>=8 && hCount>=8);
 
-    // ── Projected fallback ────────────────────────────────────────────
+    // Projected fallback
     if (!results.lineupsPosted) {
       results.projected = true;
       async function activeHitters(teamId) {
@@ -126,81 +163,52 @@ export default async function handler(req, res) {
       results.lineups.home = h.map((p,i)=>({...p,lineup_spot:i+1}));
     }
 
+    // Savant (inlined — no internal API call)
+    const savant = await getSavant();
+    if (Object.keys(savant).length) results.savantUsed = true;
+
+    // Per-player stats
     const allPlayers = [...(results.lineups.away||[]), ...(results.lineups.home||[])];
-    const oppThrows = { away: undefined, home: undefined };
-    // away batters face home SP and vice versa — captured in analyze; here we fetch both splits
-
-    // ── Savant power map (shared, cached) ─────────────────────────────
-    let savant = {};
-    try {
-      const proto = (savant_host||"").startsWith("localhost") ? "http" : "https";
-      const host = req.headers.host;
-      const sRes = await fetch(`${proto}://${host}/api/savant`);
-      const sData = await sRes.json();
-      savant = sData.players || {};
-      if (Object.keys(savant).length) results.savantUsed = true;
-    } catch {}
-
-    // ── Per-player: season + recent(14d) + splits + power ─────────────
     const playerStats = {};
     await Promise.all(allPlayers.map(async (p) => {
       const out = {};
-      // Season hitting
       try {
         const r = await fetch(`${BASE}/people/${p.id}?hydrate=stats(group=hitting,type=season,season=2026)`);
         const d = await r.json();
         const person = d.people?.[0];
         if (person?.batSide?.code) p.bats = person.batSide.code;
         const s = person?.stats?.[0]?.splits?.[0]?.stat;
-        if (s) {
-          out.avg = s.avg||".000"; out.ops = s.ops||".000"; out.hr = s.homeRuns||0;
-          out.slg = s.slg||".000"; out.iso = ((parseFloat(s.slg||0) - parseFloat(s.avg||0)).toFixed(3)); out.ab = s.atBats||0;
-        }
+        if (s) { out.avg=s.avg||".000"; out.ops=s.ops||".000"; out.hr=s.homeRuns||0; out.slg=s.slg||".000"; out.iso=(parseFloat(s.slg||0)-parseFloat(s.avg||0)).toFixed(3); out.ab=s.atBats||0; }
       } catch {}
-
-      // Recent 14-day via game logs
       try {
-        const start = daysAgoISO(14), end = daysAgoISO(0);
+        const start=daysAgoISO(14), end=daysAgoISO(0);
         const r = await fetch(`${BASE}/people/${p.id}/stats?stats=byDateRange&group=hitting&startDate=${start}&endDate=${end}&season=2026`);
         const d = await r.json();
         const s = d.stats?.[0]?.splits?.[0]?.stat;
-        if (s) {
-          out.recent_hr = s.homeRuns||0;
-          out.recent_avg = s.avg||".000";
-          out.recent_slg = s.slg||".000";
-          out.recent_ops = s.ops||".000";
-          out.recent_ab = s.atBats||0;
-          out.recent_iso = (parseFloat(s.slg||0) - parseFloat(s.avg||0)).toFixed(3);
-        }
+        if (s) { out.recent_hr=s.homeRuns||0; out.recent_avg=s.avg||".000"; out.recent_slg=s.slg||".000"; out.recent_ops=s.ops||".000"; out.recent_ab=s.atBats||0; out.recent_iso=(parseFloat(s.slg||0)-parseFloat(s.avg||0)).toFixed(3); }
       } catch {}
-
-      // Day/Night split
       try {
         const r = await fetch(`${BASE}/people/${p.id}/stats?stats=statSplits&sitCodes=${results.isNightGame?"n":"d"}&group=hitting&season=2026`);
         const d = await r.json();
         const s = d.stats?.[0]?.splits?.[0]?.stat;
-        if (s) { out.split_ops = s.ops||".000"; out.split_hr = s.homeRuns||0; out.split_label = results.isNightGame?"night":"day"; }
+        if (s) { out.split_ops=s.ops||".000"; out.split_hr=s.homeRuns||0; out.split_label=results.isNightGame?"night":"day"; }
       } catch {}
-
-      // Savant power (fallback handled in analyze)
       const sv = savant[(p.name||"").toLowerCase()];
-      if (sv) { out.barrel_pct = sv.barrel_pct; out.hard_hit_pct = sv.hard_hit_pct; out.avg_ev = sv.avg_ev; out.launch_angle = sv.launch_angle; }
-
+      if (sv) { out.barrel_pct=sv.barrel_pct; out.hard_hit_pct=sv.hard_hit_pct; out.avg_ev=sv.avg_ev; out.launch_angle=sv.launch_angle; }
       playerStats[p.id] = out;
     }));
     results.playerStats = playerStats;
 
-    // Trim projected lineups to regulars, sort by recent OPS then season OPS
     if (results.projected) {
       for (const side of ["away","home"]) {
         results.lineups[side] = (results.lineups[side]||[])
           .filter(p => (playerStats[p.id]?.ab||0) >= 30)
-          .sort((a,b) => (parseFloat(playerStats[b.id]?.recent_ops||playerStats[b.id]?.ops||0)) - (parseFloat(playerStats[a.id]?.recent_ops||playerStats[a.id]?.ops||0)))
+          .sort((a,b) => parseFloat(playerStats[b.id]?.recent_ops||playerStats[b.id]?.ops||0) - parseFloat(playerStats[a.id]?.recent_ops||playerStats[a.id]?.ops||0))
           .slice(0, 9);
       }
     }
 
-    // ── Pitcher stats (season + recent HR/9 trend) ────────────────────
+    // Pitchers
     for (const [key, pid] of [["away", away_sp_id], ["home", home_sp_id]]) {
       if (!pid || pid==="null") continue;
       const ps = {};
@@ -210,18 +218,17 @@ export default async function handler(req, res) {
         const s = d.people?.[0]?.stats?.[0]?.splits?.[0]?.stat;
         if (s) { ps.era=s.era||"N/A"; ps.whip=s.whip||"N/A"; ps.hr9=s.homeRunsPer9||"N/A"; ps.hr_allowed=s.homeRuns||0; }
       } catch {}
-      // recent 14d HR/9
       try {
-        const start = daysAgoISO(21), end = daysAgoISO(0);
+        const start=daysAgoISO(21), end=daysAgoISO(0);
         const r = await fetch(`${BASE}/people/${pid}/stats?stats=byDateRange&group=pitching&startDate=${start}&endDate=${end}&season=2026`);
         const d = await r.json();
         const s = d.stats?.[0]?.splits?.[0]?.stat;
-        if (s) { ps.recent_hr9 = s.homeRunsPer9||"N/A"; ps.recent_era = s.era||"N/A"; }
+        if (s) { ps.recent_hr9=s.homeRunsPer9||"N/A"; ps.recent_era=s.era||"N/A"; }
       } catch {}
       results.pitcherStats[key] = ps;
     }
 
-    // ── Weather ───────────────────────────────────────────────────────
+    // Weather
     const coords = Object.entries(VENUE_COORDS).find(([k]) => venue && venue.toLowerCase().includes(k.toLowerCase()))?.[1] || [40.7128,-74.0060];
     try {
       const r = await fetch(`https://api.open-meteo.com/v1/forecast?latitude=${coords[0]}&longitude=${coords[1]}&hourly=temperature_2m,windspeed_10m,winddirection_10m&temperature_unit=fahrenheit&windspeed_unit=mph&forecast_days=1&timezone=auto`);
