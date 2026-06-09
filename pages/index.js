@@ -226,13 +226,13 @@ export default function HROracle() {
           if (anData.error) throw new Error(anData.error);
 
           if (anData.skipped) {
-            // Not an error — just no lineup/roster data
-            setPendingGames(prev => [...prev, g]);
+            // Not an error — but capture WHY so it's visible
+            setPendingGames(prev => [...prev, { ...g, reason: anData.reason || "no reason given" }]);
           } else if (Array.isArray(anData.candidates) && anData.candidates.length) {
             allResults.push(...anData.candidates);
             setDoneGames(prev => [...prev, g.game_id]);
           } else {
-            setPendingGames(prev => [...prev, g]);
+            setPendingGames(prev => [...prev, { ...g, reason: "AI returned 0 valid players" }]);
           }
         } catch(e) {
           errs.push(`${g.away_team}@${g.home_team}: ${e.message.substring(0,140)}`);
@@ -381,13 +381,20 @@ export default function HROracle() {
                 {pendingGames
                   .sort((a,b)=> (a.time_et||"").localeCompare(b.time_et||""))
                   .map(g => (
-                  <div key={g.game_id} style={{ display:"flex", justifyContent:"space-between", alignItems:"center", background:"rgba(255,255,255,0.02)", border:"1px solid rgba(255,255,255,0.05)", borderRadius:8, padding:"8px 12px" }}>
-                    <span style={{ fontSize:13, fontWeight:700, color:"#cbd5e1", fontFamily:"'Barlow Condensed',sans-serif", letterSpacing:"0.03em" }}>
-                      {g.away_team} @ {g.home_team}
-                    </span>
-                    <span style={{ fontSize:11, color:"#475569", fontFamily:"monospace" }}>
-                      {g.time_et} ET
-                    </span>
+                  <div key={g.game_id} style={{ display:"flex", flexDirection:"column", gap:3, background:"rgba(255,255,255,0.02)", border:"1px solid rgba(255,255,255,0.05)", borderRadius:8, padding:"8px 12px" }}>
+                    <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center" }}>
+                      <span style={{ fontSize:13, fontWeight:700, color:"#cbd5e1", fontFamily:"'Barlow Condensed',sans-serif", letterSpacing:"0.03em" }}>
+                        {g.away_team} @ {g.home_team}
+                      </span>
+                      <span style={{ fontSize:11, color:"#475569", fontFamily:"monospace" }}>
+                        {g.time_et} ET
+                      </span>
+                    </div>
+                    {g.reason && (
+                      <span style={{ fontSize:10, color:"#f59e0b", fontFamily:"monospace" }}>
+                        ⚠ {g.reason}
+                      </span>
+                    )}
                   </div>
                 ))}
               </div>
