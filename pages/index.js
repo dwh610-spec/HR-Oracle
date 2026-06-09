@@ -194,49 +194,57 @@ export default function HROracle() {
       if (!fetchedGames.length) throw new Error("No games found for today");
       setGames(fetchedGames);
 
-      // Step 2: For each game fetch live data + analyze (throttled for free tier)
-      for (let i = 0; i < fetchedGames.length; i++) {
-        const g = fetchedGames[i];
-        setStatus(`Analyzing ${g.away_team} @ ${g.home_team} (${i+1}/${fetchedGames.length})…`);
+      // Step 2: Gather live data for ALL games (parallel, lightly batched),
+      // then make ONE analyze call for the whole slate.
+      setStatus(`Loading data for ${fetchedGames.length} games…`);
+      const ready = [];   // { game, gameData } with usable lineups
 
-        // Throttle: Gemini free tier = ~10 req/min (1 every 6s). Space games
-        // 7s apart to stay safely under the limit.
-        if (i > 0) await new Promise(r => setTimeout(r, 7000));
+      // Batch the gamedata fetches so we don't hammer the MLB API all at once.
+      const BATCH = 4;
+      for (let i = 0; i < fetchedGames.length; i += BATCH) {
+        const slice = fetchedGames.slice(i, i + BATCH);
+        setStatus(`Loading lineups & stats… (${Math.min(i+BATCH, fetchedGames.length)}/${fetchedGames.length})`);
+        await Promise.all(slice.map(async (g) => {
+          try {
+            const gdRes = await fetch(
+              `/api/gamedata?game_pk=${g.game_pk}&away_team=${g.away_team}&home_team=${g.home_team}&venue=${encodeURIComponent(g.venue)}&away_sp_id=${g.away_sp.id||""}&home_sp_id=${g.home_sp.id||""}&away_team_id=${g.away_team_id||""}&home_team_id=${g.home_team_id||""}&game_time=${encodeURIComponent(g.time_et||"")}`
+            );
+            const gameData = await gdRes.json();
+            if (gameData.error) throw new Error("data: " + gameData.error);
 
-        try {
-          // Fetch live lineups, stats, weather (team IDs + time for splits)
-          const gdRes = await fetch(
-            `/api/gamedata?game_pk=${g.game_pk}&away_team=${g.away_team}&home_team=${g.home_team}&venue=${encodeURIComponent(g.venue)}&away_sp_id=${g.away_sp.id||""}&home_sp_id=${g.home_sp.id||""}&away_team_id=${g.away_team_id||""}&home_team_id=${g.home_team_id||""}&game_time=${encodeURIComponent(g.time_et||"")}`
-          );
-          const gameData = await gdRes.json();
-          if (gameData.error) throw new Error("data: " + gameData.error);
-
-          // If no lineup AND no projection possible, mark pending
-          if (!gameData.lineupsPosted && !gameData.projected) {
-            setPendingGames(prev => [...prev, g]);
-            continue;
+            const aLen = (gameData?.lineups?.away||[]).length;
+            const hLen = (gameData?.lineups?.home||[]).length;
+            if ((!gameData.lineupsPosted && !gameData.projected) || aLen < 3 || hLen < 3) {
+              setPendingGames(prev => [...prev, { ...g, reason: "no usable lineup/roster" }]);
+            } else {
+              ready.push({ game: g, gameData });
+              setDoneGames(prev => [...prev, g.game_id]);
+            }
+          } catch(e) {
+            errs.push(`${g.away_team}@${g.home_team}: ${e.message.substring(0,120)}`);
           }
+        }));
+      }
 
-          const anRes = await fetch("/api/analyze", {
-            method:"POST",
-            headers:{"Content-Type":"application/json"},
-            body: JSON.stringify({ game: g, gameData })
-          });
-          const anData = await anRes.json();
-          if (anData.error) throw new Error(anData.error);
+      if (!ready.length) throw new Error("No games had usable lineups. Try again closer to game time.");
 
-          if (anData.skipped) {
-            // Not an error — but capture WHY so it's visible
-            setPendingGames(prev => [...prev, { ...g, reason: anData.reason || "no reason given" }]);
-          } else if (Array.isArray(anData.candidates) && anData.candidates.length) {
-            allResults.push(...anData.candidates);
-            setDoneGames(prev => [...prev, g.game_id]);
-          } else {
-            setPendingGames(prev => [...prev, { ...g, reason: "AI returned 0 valid players" }]);
-          }
-        } catch(e) {
-          errs.push(`${g.away_team}@${g.home_team}: ${e.message.substring(0,140)}`);
+      // ONE Gemini call for the entire slate.
+      setStatus(`Analyzing ${ready.length} games in one pass…`);
+      try {
+        const anRes = await fetch("/api/analyze", {
+          method:"POST",
+          headers:{"Content-Type":"application/json"},
+          body: JSON.stringify({ games: ready })
+        });
+        const anData = await anRes.json();
+        if (anData.error) throw new Error(anData.error);
+        if (Array.isArray(anData.candidates) && anData.candidates.length) {
+          allResults.push(...anData.candidates);
+        } else {
+          throw new Error(anData.reason || "AI returned no candidates");
         }
+      } catch(e) {
+        errs.push("Analysis: " + e.message.substring(0,140));
       }
 
       // Pending games (lineups not posted) are NOT an error
