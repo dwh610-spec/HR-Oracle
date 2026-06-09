@@ -236,7 +236,20 @@ export default function HROracle() {
           headers:{"Content-Type":"application/json"},
           body: JSON.stringify({ games: ready })
         });
-        const anData = await anRes.json();
+        // Read as text first — if the function times out or crashes, Vercel
+        // returns a plain-text page ("An error occurred…"), not JSON. Parsing
+        // text directly would throw a confusing "not valid JSON" error.
+        const raw = await anRes.text();
+        let anData;
+        try {
+          anData = JSON.parse(raw);
+        } catch {
+          if (anRes.status === 504 || /timed out|timeout/i.test(raw))
+            throw new Error("Analysis timed out on the server. Tap REFRESH to try again.");
+          if (anRes.status >= 500)
+            throw new Error(`Server error (${anRes.status}). Tap REFRESH to try again.`);
+          throw new Error("Server returned an unexpected response. Tap REFRESH.");
+        }
         if (anData.error) throw new Error(anData.error);
         if (Array.isArray(anData.candidates) && anData.candidates.length) {
           allResults.push(...anData.candidates);
