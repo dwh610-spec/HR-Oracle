@@ -242,6 +242,10 @@ export default async function handler(req, res) {
       };
     } catch {}
 
+results.lineupsPosted = (results.source !== "roster");
+    results.projected = (results.source === "roster") &&
+      ((results.lineups.away && results.lineups.away.length > 0) ||
+       (results.lineups.home && results.lineups.home.length > 0));
     return res.status(200).json(results);
   } catch (e) {
     return res.status(500).json({ error: e.message });
