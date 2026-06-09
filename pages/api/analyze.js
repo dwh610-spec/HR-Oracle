@@ -170,6 +170,53 @@ async function callGemini(model, prompt, key) {
   return { ok:true, candidates: cands };
 }
 
+// ── OpenRouter ───────────────────────────────────────────────────────────────
+// OpenAI-compatible endpoint. Free models have large context windows, so the
+// whole slate goes in one call. `model` is an OpenRouter model slug.
+async function callOpenRouter(model, prompt, key) {
+  const cleanKey = (key || "").trim();
+  let r;
+  try {
+    r = await fetchWithTimeout("https://openrouter.ai/api/v1/chat/completions", {
+      method:"POST",
+      headers:{
+        "Content-Type":"application/json",
+        "Authorization":`Bearer ${cleanKey}`,
+        "HTTP-Referer":"https://hr-oracle.vercel.app",
+        "X-Title":"HR Oracle"
+      },
+      body: JSON.stringify({
+        model,
+        temperature: 0.3,
+        max_tokens: 6000,
+        response_format: { type: "json_object" },
+        messages: [{ role:"user", content: prompt }]
+      })
+    }, 50000);
+  } catch(e) {
+    if (e.name === "AbortError") return { ok:false, kind:"timeout", msg:`OR ${model} timed out` };
+    return { ok:false, kind:"network", msg:`OR ${model}: ${e.message}` };
+  }
+  let data;
+  try { data = await r.json(); }
+  catch { return { ok:false, kind:"parse", msg:`OR ${model} non-JSON HTTP ${r.status}` }; }
+
+  if (r.status === 429 || data?.error?.code === 429) return { ok:false, kind:"rate", msg:`OR ${model} rate-limited` };
+  if (r.status === 503 || r.status === 500 || r.status === 502) return { ok:false, kind:"busy", msg:`OR ${model} busy (${r.status})` };
+  if (data?.error) return { ok:false, kind:"api", msg:`OR ${model}: ${(data.error.message||"").substring(0,90)}` };
+
+  const msg = data?.choices?.[0]?.message || {};
+  const text = msg.content || msg.reasoning || "";
+  const finish = data?.choices?.[0]?.finish_reason || "";
+  if (!text) return { ok:false, kind:"empty", msg:`OR ${model} empty (${finish||"?"})` };
+  const cands = extractCandidates(text);
+  if (!cands) {
+    if (finish === "length") return { ok:false, kind:"toobig", msg:`OR ${model} truncated` };
+    return { ok:false, kind:"unparseable", msg:`OR ${model} unparseable (${finish||"?"})` };
+  }
+  return { ok:true, candidates: cands };
+}
+
 // Split blocks into chunks whose prompt fits Cerebras's context budget.
 // gpt-oss-120b caps total context at 8,192 tokens AND reserves a big chunk for
 // reasoning + answer (we allow 5,000 for completion). So keep INPUT small —
@@ -201,10 +248,11 @@ export default async function handler(req, res) {
     try { body = JSON.parse(body); } catch { body = {}; }
   }
   const games = body?.games;
+  const OPENROUTER_KEY = process.env.OPENROUTER_API_KEY;
   const CEREBRAS_KEY = process.env.CEREBRAS_API_KEY;
   const GEMINI_KEY = process.env.GEMINI_API_KEY;
-  if (!CEREBRAS_KEY && !GEMINI_KEY)
-    return res.status(500).json({ error: "No API key set (need CEREBRAS_API_KEY or GEMINI_API_KEY)" });
+  if (!OPENROUTER_KEY && !CEREBRAS_KEY && !GEMINI_KEY)
+    return res.status(500).json({ error: "No API key set (need OPENROUTER_API_KEY, CEREBRAS_API_KEY or GEMINI_API_KEY)" });
   if (!Array.isArray(games) || !games.length)
     return res.status(400).json({ error: "no games provided" });
 
@@ -235,7 +283,31 @@ export default async function handler(req, res) {
 
   let lastMsg = "";
 
-  // ── Provider 1: Gemini flash-lite (confirmed working, one clean batch call) ──
+  // ── Provider 1: OpenRouter (fresh quota tonight, large context = one call) ──
+  // Tries several free models in order; if one is busy/limited it falls to the
+  // next. All are free slugs (":free").
+  if (OPENROUTER_KEY) {
+    const prompt = buildPrompt(blocks);
+    const orModels = [
+      "meta-llama/llama-3.3-70b-instruct:free",
+      "deepseek/deepseek-chat:free",
+      "qwen/qwen-2.5-72b-instruct:free",
+      "google/gemma-2-9b-it:free"
+    ];
+    for (const model of orModels) {
+      for (let attempt = 1; attempt <= 2; attempt++) {
+        const r = await callOpenRouter(model, prompt, OPENROUTER_KEY);
+        if (r.ok) return finalize(r.candidates, "openrouter:" + model.split("/").pop());
+        lastMsg = r.msg;
+        if (["busy","empty","unparseable","network"].includes(r.kind) && attempt < 2) {
+          await sleep(3000); continue;
+        }
+        break; // rate/timeout/api/toobig on this model → try next model
+      }
+    }
+  }
+
+  // ── Provider 3: Gemini flash-lite (confirmed working, one clean batch call) ──
   // flash-lite has the most generous free tier (15 RPM, 1000/day) and 1M context,
   // so the whole slate goes in one request — no splitting.
   if (GEMINI_KEY) {
@@ -253,7 +325,7 @@ export default async function handler(req, res) {
     }
   }
 
-  // ── Provider 2: Cerebras (fallback). Split into chunks that fit its context. ──
+  // ── Provider 4: Cerebras (fallback). Split into chunks that fit its context. ──
   if (CEREBRAS_KEY) {
     const allChunks = chunkForCerebras(blocks);
     // With throttling each chunk can take several seconds; cap how many we try
