@@ -1,5 +1,5 @@
 // pages/index.js
-import { useState, useEffect, useRef } from "react";
+import React, { useState, useEffect, useRef } from "react";
 import Head from "next/head";
 
 function todayStr() {
@@ -168,7 +168,7 @@ function GameView({ games, batters }) {
   );
 }
 
-export default function HROracle() {
+function HROracleInner() {
   const [tab, setTab] = useState(0);
   const [games, setGames] = useState([]);
   const [batters, setBatters] = useState([]);
@@ -446,5 +446,42 @@ export default function HROracle() {
         @keyframes pulse { from { opacity: 0.4; } to { opacity: 1; } }
       `}</style>
     </>
+  );
+}
+
+// Error boundary: converts any render crash into a readable on-screen message
+// instead of Next.js's blank white "Application error" page.
+class ErrorBoundary extends React.Component {
+  constructor(props){ super(props); this.state = { err: null }; }
+  static getDerivedStateFromError(err){ return { err }; }
+  componentDidCatch(err, info){ /* could log here */ }
+  render(){
+    if (this.state.err) {
+      return (
+        <div style={{ minHeight:"100vh", background:"#070d1a", color:"#f1f5f9", fontFamily:"system-ui,sans-serif", padding:"40px 20px" }}>
+          <div style={{ maxWidth:600, margin:"0 auto" }}>
+            <div style={{ fontSize:42, fontWeight:800, fontFamily:"'Barlow Condensed',sans-serif", letterSpacing:"0.04em", background:"linear-gradient(120deg,#f97316,#fbbf24)", WebkitBackgroundClip:"text", WebkitTextFillColor:"transparent" }}>HR ORACLE</div>
+            <div style={{ marginTop:20, background:"rgba(239,68,68,0.08)", border:"1px solid rgba(239,68,68,0.25)", borderRadius:12, padding:"16px 18px" }}>
+              <div style={{ color:"#f87171", fontWeight:700, marginBottom:8 }}>⚠️ Display error</div>
+              <div style={{ color:"#fca5a5", fontSize:13, fontFamily:"monospace", lineHeight:1.6, wordBreak:"break-word" }}>
+                {String(this.state.err?.message || this.state.err)}
+              </div>
+            </div>
+            <button onClick={()=>{ this.setState({err:null}); if(typeof window!=="undefined") window.location.reload(); }} style={{ marginTop:16, background:"linear-gradient(135deg,#f97316,#ea580c)", color:"#fff", border:"none", borderRadius:10, padding:"11px 22px", fontSize:13, fontWeight:700, fontFamily:"monospace", cursor:"pointer" }}>
+              ↻ RELOAD
+            </button>
+          </div>
+        </div>
+      );
+    }
+    return this.props.children;
+  }
+}
+
+export default function HROracle() {
+  return (
+    <ErrorBoundary>
+      <HROracleInner/>
+    </ErrorBoundary>
   );
 }
