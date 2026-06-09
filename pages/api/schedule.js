@@ -46,9 +46,17 @@ export default async function handler(req, res) {
           } catch {}
         }
 
-        const gameTime = game.gameDate ? new Date(game.gameDate).toLocaleTimeString("en-US", {
-          hour: "numeric", minute: "2-digit", timeZone: "America/New_York"
-        }) : "TBD";
+        let gameTime = "TBD";
+        try {
+          if (game.gameDate) {
+            const d = new Date(game.gameDate);
+            if (!isNaN(d.getTime())) {
+              gameTime = d.toLocaleTimeString("en-US", {
+                hour: "numeric", minute: "2-digit", timeZone: "America/New_York"
+              });
+            }
+          }
+        } catch { gameTime = "TBD"; }
 
         games.push({
           game_id: `${away?.team?.abbreviation}_${home?.team?.abbreviation}`,
