@@ -79,6 +79,21 @@ function extractCandidates(rawText) {
   return arr || null;
 }
 
+// Last-resort salvage for truncated output (MAX_TOKENS): pull every COMPLETE
+// {...} object out of a cut-off array and parse them individually. A response
+// that got chopped mid-array still yields all the candidates before the cut.
+function salvageCandidates(rawText) {
+  if (!rawText) return null;
+  const out = [];
+  // Match balanced-ish object literals that contain a "name" field.
+  const re = /\{[^{}]*"name"[^{}]*\}/g;
+  let m;
+  while ((m = re.exec(rawText)) !== null) {
+    try { out.push(JSON.parse(m[0])); } catch {}
+  }
+  return out.length ? out : null;
+}
+
 // ── Cerebras ───────────────────────────────────────────────────────────────
 // Free tier: 8,192-token context. Param is max_completion_tokens. JSON mode
 // via response_format. Only gpt-oss-120b / zai-glm-4.7 available on this key.
@@ -146,7 +161,7 @@ async function callGemini(model, prompt, key) {
       method:"POST", headers:{ "Content-Type":"application/json" },
       body: JSON.stringify({
         contents: [{ parts: [{ text: prompt }] }],
-        generationConfig: { temperature: 0.3, maxOutputTokens: 6000, responseMimeType: "application/json" }
+        generationConfig: { temperature: 0.3, maxOutputTokens: 16000, responseMimeType: "application/json" }
       })
     }, 45000);
   } catch(e) {
@@ -165,7 +180,9 @@ async function callGemini(model, prompt, key) {
   const text = data.candidates?.[0]?.content?.parts?.[0]?.text || "";
   const finish = data.candidates?.[0]?.finishReason || "";
   if (!text) return { ok:false, kind:"empty", msg:`${model} empty (${finish||"?"})` };
-  const cands = extractCandidates(text);
+  let cands = extractCandidates(text);
+  // If output was cut off (MAX_TOKENS), salvage the complete objects we did get.
+  if (!cands) cands = salvageCandidates(text);
   if (!cands) return { ok:false, kind:"unparseable", msg:`${model} unparseable (${finish||"?"})` };
   return { ok:true, candidates: cands };
 }
@@ -188,7 +205,7 @@ async function callOpenRouter(model, prompt, key, timeoutMs) {
       body: JSON.stringify({
         model,
         temperature: 0.3,
-        max_tokens: 6000,
+        max_tokens: 16000,
         response_format: { type: "json_object" },
         messages: [{ role:"user", content: prompt }]
       })
@@ -209,7 +226,8 @@ async function callOpenRouter(model, prompt, key, timeoutMs) {
   const text = msg.content || msg.reasoning || "";
   const finish = data?.choices?.[0]?.finish_reason || "";
   if (!text) return { ok:false, kind:"empty", msg:`OR ${model} empty (${finish||"?"})` };
-  const cands = extractCandidates(text);
+  let cands = extractCandidates(text);
+  if (!cands) cands = salvageCandidates(text);
   if (!cands) {
     if (finish === "length") return { ok:false, kind:"toobig", msg:`OR ${model} truncated` };
     return { ok:false, kind:"unparseable", msg:`OR ${model} unparseable (${finish||"?"})` };
