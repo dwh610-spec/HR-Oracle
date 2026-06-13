@@ -93,7 +93,7 @@ export default async function handler(req, res) {
   try {
     const results = {
       lineups: {}, pitcherStats: {}, weather: null, injured: [],
-      lineupsPosted: false, projected: false,
+      lineupsPosted: false, projected: false, gameState: "",
       elevation: VENUE_ELEV[Object.keys(VENUE_ELEV).find(k => venue && venue.toLowerCase().includes(k.toLowerCase()))] || 20,
       isNightGame: false, savantUsed: false
     };
@@ -125,7 +125,8 @@ export default async function handler(req, res) {
     results.injured = injuredNames;
 
     // Posted lineup
-    let aCount=0, hCount=0;
+    let aPosted=0, hPosted=0;   // raw battingOrder length straight from MLB
+    let gameState = "";          // abstract game state: Preview / Live / Final
     if (game_pk) {
       try {
         const r = await fetch(`${BASE}/game/${game_pk}/boxscore`);
@@ -136,16 +137,31 @@ export default async function handler(req, res) {
           const players = t?.players || {};
           const lineup = [];
           order.forEach((id, idx) => {
-            if (injuredIds.has(id)) return;
             const p = players[`ID${id}`];
+            // Keep the posted batter even if flagged injured — if MLB lists them
+            // in the batting order, they are playing. (Injury codes can be stale.)
             if (p) lineup.push({ id, name:p.person?.fullName||"?", position:p.position?.abbreviation||"", lineup_spot:idx+1, bats:p.person?.batSide?.code||"R" });
           });
           results.lineups[side] = lineup;
-          if (side==="away") aCount=lineup.length; else hCount=lineup.length;
+          if (side==="away") aPosted=order.length; else hPosted=order.length;
         }
       } catch {}
     }
-    results.lineupsPosted = (aCount>=8 && hCount>=8);
+
+    // Pull game status separately so in-progress/final games are always trusted.
+    if (game_pk) {
+      try {
+        const sr = await fetch(`${BASE}/game/${game_pk}/feed/live`);
+        const sd = await sr.json();
+        gameState = (sd.gameData?.status?.abstractGameState || "").toLowerCase();
+      } catch {}
+    }
+    const gameStarted = gameState === "live" || gameState === "final";
+    results.gameState = gameState;
+
+    // A lineup is "posted" if MLB gave us a real batting order (>=8) on BOTH
+    // sides, OR the game has already started (then whatever MLB has is real).
+    results.lineupsPosted = (aPosted>=8 && hPosted>=8) || (gameStarted && aPosted>=1 && hPosted>=1);
 
     // Projected fallback
     if (!results.lineupsPosted) {
