@@ -32,13 +32,19 @@ function gameBlock(game, gameData) {
   const fmt = (arr) => arr.map(p => {
     const s = gameData?.playerStats?.[p.id] || {};
     const power = s.barrel_pct ? ` Brl%${s.barrel_pct}EV${s.avg_ev||"?"}` : "";
-    return `${p.name}(${p.bats}) HR${s.hr||0} OPS${s.ops||"?"} ISO${s.iso||"?"} L14:HR${s.recent_hr??0}ISO${s.recent_iso||"?"}OPS${s.recent_ops||"?"}(${s.recent_ab||0}ab)${power}`;
+    const air = (s.fb_pct!=null) ? ` FB%${s.fb_pct}` : "";
+    // Platoon line: this hitter's numbers vs the hand of the SP he actually faces.
+    const plat = s.plat_ops ? ` vs${s.plat_hand}HP:OPS${s.plat_ops}HR${s.plat_hr}ISO${s.plat_iso}(${s.plat_ab}ab)` : "";
+    return `#${p.lineup_spot||"?"} ${p.name}(${p.bats}) HR${s.hr||0} OPS${s.ops||"?"} ISO${s.iso||"?"}${air} L14:HR${s.recent_hr??0}ISO${s.recent_iso||"?"}OPS${s.recent_ops||"?"}(${s.recent_ab||0}ab)${power}${plat}`;
   }).join("\n");
 
+  const aFb = aP.fb_pct!=null ? ` FB%${aP.fb_pct}` : "";
+  const hFb = hP.fb_pct!=null ? ` FB%${hP.fb_pct}` : "";
+
   return `=== ${game.away_team}@${game.home_team} @${game.venue} ${slot} elev${elevation}${isProjected?" [PROJ]":""}
-ASP ${game.away_sp.name}(${game.away_sp.throws}) ERA${aP.era||game.away_sp.era} HR/9 ${aP.hr9||"?"}
-HSP ${game.home_sp.name}(${game.home_sp.throws}) ERA${hP.era||game.home_sp.era} HR/9 ${hP.hr9||"?"}
-Wx:${weather.summary||"?"} wind${weather.wind_dir||"?"}
+ASP ${game.away_sp.name}(${game.away_sp.throws}) ERA${aP.era||game.away_sp.era} HR/9 ${aP.hr9||"?"}${aFb}
+HSP ${game.home_sp.name}(${game.home_sp.throws}) ERA${hP.era||game.home_sp.era} HR/9 ${hP.hr9||"?"}${hFb}
+Wx:${weather.summary||"?"}${weather.wind_effect?` [${weather.wind_effect}]`:""}
 AWAY(vs ${game.home_sp.throws}HP):
 ${fmt(awayList)}
 HOME(vs ${game.away_sp.throws}HP):
@@ -49,10 +55,10 @@ const INSTRUCTIONS_HEAD = `You are an elite MLB home-run prediction model. Below
 
 Return the strongest 2-3 hitters from each game. Games tagged [PROJ] have projected (not confirmed) lineups — still analyze them.
 
-SCORING PRIORITY: (1) RECENT 14-day form DOMINATES — weight recent ~65%, season ~35%; a hot bat beats a cold star. (2) power metrics (barrel%, EV). (3) pitcher HR/9. (4) platoon handedness (batter bats vs SP throws). (5) park/elevation (high elev boosts HR). (6) weather/wind. Reward hot+powerful 80+, push cold bats into 30s-40s. Use decimal hr_score to break ties.`;
+SCORING PRIORITY: (1) RECENT 14-day form DOMINATES — weight recent ~60%, season ~40%; a hot bat beats a cold star. (2) PLATOON split — use the hitter's "vsLHP/vsRHP" line (OPS/ISO/HR) against the starter he actually faces; a strong platoon edge is a major boost. (3) power metrics (barrel%, EV). (4) batted-ball shape — high batter FB% (fly-ball hitter) + high pitcher FB% (fly-ball pitcher) together is a prime HR setup; a ground-ball hitter rarely homers regardless of power. (5) pitcher HR/9 and FB%. (6) WIND: "OUT to CF" strongly boosts HR, "IN from CF" strongly suppresses it, indoor/roof is neutral. (7) park/elevation (high elev boosts HR). (8) lineup spot — hitters batting 1-5 get more PAs and better pitches to hit than 6-9; weight top-of-order bats up slightly. (9) temperature — warm air (>78°F) adds carry. Reward hot+powerful+favorable-platoon+wind-out 85+, push cold or wind-in or ground-ball bats into 30s-40s. Use decimal hr_score to break ties.`;
 
 const INSTRUCTIONS_TAIL = `Respond with ONLY JSON (no markdown):
-{"candidates":[{"name":"","team":"","bats":"L","lineup_spot":3,"opposing_sp":"","sp_throws":"R","pitcher_grade":"AVERAGE","batter_grade":"HOT","hr_score":72.4,"hr_prob":"14%","key_stats":[{"label":"L14 HR","value":"4"},{"label":"L14 ISO","value":".310"},{"label":"Brl%","value":"15"},{"label":"SP HR/9","value":"1.6"}],"summary":"brief"}]}
+{"candidates":[{"name":"","team":"","bats":"L","lineup_spot":3,"opposing_sp":"","sp_throws":"R","pitcher_grade":"AVERAGE","batter_grade":"HOT","hr_score":72.4,"hr_prob":"14%","key_stats":[{"label":"L14 HR","value":"4"},{"label":"L14 ISO","value":".310"},{"label":"vsRHP OPS","value":".940"},{"label":"Brl%","value":"15"}],"summary":"brief — mention platoon edge, wind, or FB-shape when relevant"}]}
 Only use players listed above. team = the 2-3 letter abbreviation. pitcher_grade: BATTING PRACTICE|AVERAGE|STUD. batter_grade: FIRE|HOT|AVERAGE|COLD.`;
 
 function buildPrompt(blocks) {
