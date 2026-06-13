@@ -42,6 +42,41 @@ const VENUE_COORDS = {
   "Las Vegas Ballpark":[36.1318,-115.1505]
 };
 
+// Compass bearing (degrees) from home plate toward center field for each park.
+// Used with wind direction to decide whether wind helps or hurts home runs.
+// Domes/retractable roofs (usually closed) are marked dome:true → wind ignored.
+const VENUE_ORIENT = {
+  "Fenway Park":{cf:45},"Yankee Stadium":{cf:25},"Citi Field":{cf:25},
+  "Citizens Bank Park":{cf:0},"Wrigley Field":{cf:36},"Rate Field":{cf:5},
+  "Guaranteed Rate Field":{cf:5},"Great American Ball Park":{cf:50},
+  "Oracle Park":{cf:75},"Dodger Stadium":{cf:25},"Angel Stadium":{cf:40},
+  "Petco Park":{cf:0},"T-Mobile Park":{cf:0,dome:true},"Daikin Park":{cf:0,dome:true},
+  "Minute Maid Park":{cf:0,dome:true},"Globe Life Field":{cf:0,dome:true},
+  "Truist Park":{cf:25},"loanDepot park":{cf:25,dome:true},"Nationals Park":{cf:30},
+  "PNC Park":{cf:60},"Busch Stadium":{cf:30},"American Family Field":{cf:0,dome:true},
+  "Target Field":{cf:15},"Kauffman Stadium":{cf:0},"Progressive Field":{cf:0},
+  "Comerica Park":{cf:30},"Oriole Park at Camden Yards":{cf:0},"Camden Yards":{cf:0},
+  "Rogers Centre":{cf:0,dome:true},"Tropicana Field":{cf:0,dome:true},
+  "Chase Field":{cf:25,dome:true},"Coors Field":{cf:0}
+};
+
+// Given the park's CF bearing and the meteorological wind direction (the
+// direction wind blows FROM), return a short human label the model understands.
+function windEffect(venue, windFromDeg, windMph) {
+  const key = venue && Object.keys(VENUE_ORIENT).find(k => venue.toLowerCase().includes(k.toLowerCase()));
+  if (!key) return null;
+  const o = VENUE_ORIENT[key];
+  if (o.dome) return "indoor/roof (wind neutral)";
+  if (windMph < 5) return "calm";
+  // Wind blows TOWARD (fromDeg + 180). Compare to CF bearing.
+  const towardDeg = (windFromDeg + 180) % 360;
+  let diff = Math.abs(towardDeg - o.cf);
+  if (diff > 180) diff = 360 - diff;
+  if (diff <= 45) return `OUT to CF (+HR, ${windMph}mph)`;        // helps HR
+  if (diff >= 135) return `IN from CF (-HR, ${windMph}mph)`;       // suppresses HR
+  return `cross-wind (${windMph}mph)`;                            // neutral-ish
+}
+
 // ── Module-level Savant cache (persists across warm invocations) ────────
 let SAVANT_CACHE = { ts: 0, data: null };
 
@@ -185,7 +220,24 @@ export default async function handler(req, res) {
     const savant = await getSavant();
     if (Object.keys(savant).length) results.savantUsed = true;
 
+    // Resolve each starter's throwing hand up front — batters need the opposing
+    // SP's handedness to fetch the correct vs-LHP / vs-RHP platoon split.
+    const spThrows = {}; // { away: "R"|"L", home: "R"|"L" }
+    await Promise.all([["away", away_sp_id], ["home", home_sp_id]].map(async ([key, pid]) => {
+      if (!pid || pid === "null") return;
+      try {
+        const r = await fetch(`${BASE}/people/${pid}`);
+        const d = await r.json();
+        spThrows[key] = d.people?.[0]?.pitchHand?.code || "R";
+      } catch { spThrows[key] = "R"; }
+    }));
+    // Away batters face the HOME starter and vice-versa.
+    const oppHandForSide = { away: spThrows.home || "R", home: spThrows.away || "R" };
+
     // Per-player stats
+    const sideOf = {};
+    (results.lineups.away||[]).forEach(p => { sideOf[p.id] = "away"; });
+    (results.lineups.home||[]).forEach(p => { sideOf[p.id] = "home"; });
     const allPlayers = [...(results.lineups.away||[]), ...(results.lineups.home||[])];
     const playerStats = {};
     await Promise.all(allPlayers.map(async (p) => {
@@ -196,7 +248,15 @@ export default async function handler(req, res) {
         const person = d.people?.[0];
         if (person?.batSide?.code) p.bats = person.batSide.code;
         const s = person?.stats?.[0]?.splits?.[0]?.stat;
-        if (s) { out.avg=s.avg||".000"; out.ops=s.ops||".000"; out.hr=s.homeRuns||0; out.slg=s.slg||".000"; out.iso=(parseFloat(s.slg||0)-parseFloat(s.avg||0)).toFixed(3); out.ab=s.atBats||0; }
+        if (s) {
+          out.avg=s.avg||".000"; out.ops=s.ops||".000"; out.hr=s.homeRuns||0; out.slg=s.slg||".000";
+          out.iso=(parseFloat(s.slg||0)-parseFloat(s.avg||0)).toFixed(3); out.ab=s.atBats||0;
+          // Batted-ball profile: fly-ball rate is the strongest HR-enabling shape.
+          // MLB exposes groundOuts/airOuts; FB-leaning hitters air the ball out.
+          const go = s.groundOuts||0, ao = s.airOuts||0;
+          if (go+ao > 0) out.fb_pct = Math.round(ao/(go+ao)*100); // % of balls in air
+          out.gb_fb = go>0 ? (ao/go).toFixed(2) : null;            // air/ground ratio
+        }
       } catch {}
       try {
         const start=daysAgoISO(14), end=daysAgoISO(0);
@@ -210,6 +270,22 @@ export default async function handler(req, res) {
         const d = await r.json();
         const s = d.stats?.[0]?.splits?.[0]?.stat;
         if (s) { out.split_ops=s.ops||".000"; out.split_hr=s.homeRuns||0; out.split_label=results.isNightGame?"night":"day"; }
+      } catch {}
+      // Platoon split vs the handedness of the starter this batter actually faces.
+      try {
+        const oppHand = oppHandForSide[sideOf[p.id]] || "R";
+        const sit = oppHand === "L" ? "vl" : "vr"; // vs LHP / vs RHP
+        const r = await fetch(`${BASE}/people/${p.id}/stats?stats=statSplits&sitCodes=${sit}&group=hitting&season=2026`);
+        const d = await r.json();
+        const s = d.stats?.[0]?.splits?.[0]?.stat;
+        if (s) {
+          out.plat_hand = oppHand;
+          out.plat_ops = s.ops||".000";
+          out.plat_slg = s.slg||".000";
+          out.plat_hr = s.homeRuns||0;
+          out.plat_ab = s.atBats||0;
+          out.plat_iso = (parseFloat(s.slg||0)-parseFloat(s.avg||0)).toFixed(3);
+        }
       } catch {}
       const sv = savant[(p.name||"").toLowerCase()];
       if (sv) { out.barrel_pct=sv.barrel_pct; out.hard_hit_pct=sv.hard_hit_pct; out.avg_ev=sv.avg_ev; out.launch_angle=sv.launch_angle; }
@@ -243,7 +319,13 @@ export default async function handler(req, res) {
         const r = await fetch(`${BASE}/people/${pid}?hydrate=stats(group=pitching,type=season,season=2026)`);
         const d = await r.json();
         const s = d.people?.[0]?.stats?.[0]?.splits?.[0]?.stat;
-        if (s) { ps.era=s.era||"N/A"; ps.whip=s.whip||"N/A"; ps.hr9=s.homeRunsPer9||"N/A"; ps.hr_allowed=s.homeRuns||0; }
+        if (s) {
+          ps.era=s.era||"N/A"; ps.whip=s.whip||"N/A"; ps.hr9=s.homeRunsPer9||"N/A"; ps.hr_allowed=s.homeRuns||0;
+          // Fly-ball rate: a pitcher who lets hitters put the ball in the air
+          // gives up more HRs than HR/9 alone reveals (it leads results).
+          const go=s.groundOuts||0, ao=s.airOuts||0;
+          if (go+ao>0) ps.fb_pct = Math.round(ao/(go+ao)*100);
+        }
       } catch {}
       try {
         const start=daysAgoISO(21), end=daysAgoISO(0);
@@ -261,11 +343,15 @@ export default async function handler(req, res) {
       const r = await fetch(`https://api.open-meteo.com/v1/forecast?latitude=${coords[0]}&longitude=${coords[1]}&hourly=temperature_2m,windspeed_10m,winddirection_10m&temperature_unit=fahrenheit&windspeed_unit=mph&forecast_days=1&timezone=auto`);
       const d = await r.json();
       const idx = results.isNightGame ? 19 : 13;
+      const wdir = d.hourly?.winddirection_10m?.[idx]||180;
+      const wmph = Math.round(d.hourly?.windspeed_10m?.[idx]||5);
+      const wEffect = windEffect(venue, wdir, wmph);
       results.weather = {
         temp: Math.round(d.hourly?.temperature_2m?.[idx]||70)+"°F",
-        wind_speed: Math.round(d.hourly?.windspeed_10m?.[idx]||5)+" mph",
-        wind_dir: d.hourly?.winddirection_10m?.[idx]||180,
-        summary: `${Math.round(d.hourly?.temperature_2m?.[idx]||70)}°F, wind ${Math.round(d.hourly?.windspeed_10m?.[idx]||5)} mph`
+        wind_speed: wmph+" mph",
+        wind_dir: wdir,
+        wind_effect: wEffect,
+        summary: `${Math.round(d.hourly?.temperature_2m?.[idx]||70)}°F, ${wEffect||`wind ${wmph}mph`}`
       };
     } catch {}
 
