@@ -35,7 +35,7 @@ function gameBlock(game, gameData) {
     const air = (s.fb_pct!=null) ? ` FB%${s.fb_pct}` : "";
     // Platoon line: this hitter's numbers vs the hand of the SP he actually faces.
     const plat = s.plat_ops ? ` vs${s.plat_hand}HP:OPS${s.plat_ops}HR${s.plat_hr}ISO${s.plat_iso}(${s.plat_ab}ab)` : "";
-    return `#${p.lineup_spot||"?"} ${p.name}(${p.bats}) HR${s.hr||0} OPS${s.ops||"?"} ISO${s.iso||"?"}${air} L14:HR${s.recent_hr??0}ISO${s.recent_iso||"?"}OPS${s.recent_ops||"?"}(${s.recent_ab||0}ab)${power}${plat}`;
+    return `${p.name}(${p.bats}) #${p.lineup_spot||"?"} HR${s.hr||0} OPS${s.ops||"?"} ISO${s.iso||"?"}${air} L14:HR${s.recent_hr??0}ISO${s.recent_iso||"?"}OPS${s.recent_ops||"?"}(${s.recent_ab||0}ab)${power}${plat}`;
   }).join("\n");
 
   const aFb = aP.fb_pct!=null ? ` FB%${aP.fb_pct}` : "";
@@ -295,11 +295,40 @@ export default async function handler(req, res) {
   if (!blocks.length)
     return res.status(200).json({ candidates: [], reason: "no usable lineups in any game" });
 
+  // Normalize a name for matching: lowercase, strip a leading "#3 " lineup
+  // prefix, drop punctuation/accents, collapse spaces.
+  const normName = (s) => String(s||"")
+    .toLowerCase()
+    .replace(/^#?\d+\s+/, "")           // strip any leading lineup number
+    .normalize("NFD").replace(/[\u0300-\u036f]/g, "") // strip accents
+    .replace(/[.\-']/g, "")
+    .replace(/\s+/g, " ")
+    .trim();
+
+  // Build a normalized allow-set plus a last-name index for fuzzy fallback.
+  const validNorm = new Set([...validLower].map(normName));
+  const validLast = new Set([...validNorm].map(n => n.split(" ").pop()));
+
   const finalize = (cands, source) => {
     const seen = new Set();
-    const out = cands
-      .filter(c => c && c.name && validLower.has((c.name||"").toLowerCase()))
-      .filter(c => { const k=(c.name||"").toLowerCase()+"|"+(c.team||""); if(seen.has(k))return false; seen.add(k); return true; })
+    const clean = (cands || [])
+      .filter(c => c && c.name)
+      .map(c => ({ ...c, name: String(c.name).replace(/^#?\d+\s+/, "").trim() }));
+
+    // Tier 1: exact normalized match against the lineup allow-list.
+    let kept = clean.filter(c => validNorm.has(normName(c.name)));
+    // Tier 2: if exact matching removed (almost) everything, fall back to a
+    // last-name match so a small formatting difference can't zero out the board.
+    if (kept.length < 3) {
+      const byLast = clean.filter(c => validLast.has(normName(c.name).split(" ").pop()));
+      if (byLast.length > kept.length) kept = byLast;
+    }
+    // Tier 3: if we STILL have nothing but the AI clearly returned players,
+    // trust the AI rather than show an empty board (better partial than blank).
+    if (!kept.length && clean.length) kept = clean;
+
+    const out = kept
+      .filter(c => { const k=normName(c.name)+"|"+(c.team||""); if(seen.has(k))return false; seen.add(k); return true; })
       .map(c => ({ ...c, hr_score: Math.round((parseFloat(c.hr_score)||0)*10)/10, projected: projectedAny }))
       .sort((a,b) => b.hr_score - a.hr_score);
     return res.status(200).json({ candidates: out, source });
