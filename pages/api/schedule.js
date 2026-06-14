@@ -6,10 +6,13 @@ export default async function handler(req, res) {
   res.setHeader("Access-Control-Allow-Origin", "*");
 
   try {
-    const today = new Date().toISOString().split("T")[0];
+    // Use US Eastern calendar date, NOT UTC. new Date().toISOString() is UTC,
+    // which after ~8pm ET has already rolled to tomorrow — that's why late-night
+    // runs were pulling the next day's slate. en-CA gives YYYY-MM-DD format.
+    const today = new Date().toLocaleDateString("en-CA", { timeZone: "America/New_York" });
 
     const mlbRes = await fetch(
-      `https://statsapi.mlb.com/api/v1/schedule?sportId=1&date=${today}&hydrate=probablePitcher(note),team,venue`
+      `https://statsapi.mlb.com/api/v1/schedule?sportId=1&date=${today}&hydrate=probablePitcher(note),team,venue,linescore`
     );
     const mlbData = await mlbRes.json();
 
@@ -17,6 +20,15 @@ export default async function handler(req, res) {
 
     for (const date of mlbData.dates || []) {
       for (const game of date.games || []) {
+        // Game state: "Preview" (upcoming), "Live" (in progress), "Final" (done).
+        const abstractState = game.status?.abstractGameState || "";
+        const detailed = game.status?.detailedState || "";
+        const isFinal = abstractState === "Final" || /final|completed|game over/i.test(detailed);
+        const isLive = abstractState === "Live" || /in progress|manager challenge|warmup|delayed/i.test(detailed);
+
+        // Skip games that are already over — they're not actionable for HR picks.
+        if (isFinal) continue;
+
         const away = game.teams?.away;
         const home = game.teams?.home;
         const venue = game.venue?.name || "Unknown Venue";
@@ -67,7 +79,9 @@ export default async function handler(req, res) {
           home_team_id: home?.team?.id || null,
           time_et: gameTime,
           venue,
-          status: game.status?.detailedState || "",
+          status: detailed,
+          live: isLive,                       // true if game already underway
+          state: isLive ? "live" : "upcoming",
           away_sp: { id: awayPitcher?.id || null, name: awayPitcher?.fullName || "TBD", throws: awayThrows, era: awayEra },
           home_sp: { id: homePitcher?.id || null, name: homePitcher?.fullName || "TBD", throws: homeThrows, era: homeEra }
         });
