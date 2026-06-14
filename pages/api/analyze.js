@@ -98,19 +98,40 @@ function extractCandidates(rawText) {
   return arr || null;
 }
 
-// Last-resort salvage for truncated output (MAX_TOKENS): pull every COMPLETE
-// {...} object out of a cut-off array and parse them individually. A response
-// that got chopped mid-array still yields all the candidates before the cut.
+// Last-resort salvage for truncated output (MAX_TOKENS): walk the text tracking
+// brace depth and string state, and capture EVERY balanced {...} object that
+// contains a "name" field — at any nesting depth, since the candidate objects
+// live inside an outer {"candidates":[ ... ]} wrapper that never closes when the
+// response is cut off. Each complete candidate before the cut is recovered.
 function salvageCandidates(rawText) {
   if (!rawText) return null;
   const out = [];
-  // Match balanced-ish object literals that contain a "name" field.
-  const re = /\{[^{}]*"name"[^{}]*\}/g;
-  let m;
-  while ((m = re.exec(rawText)) !== null) {
-    try { out.push(JSON.parse(m[0])); } catch {}
+  const stack = [];           // start-index of each open brace
+  let inStr = false, esc = false;
+  for (let i = 0; i < rawText.length; i++) {
+    const ch = rawText[i];
+    if (inStr) {
+      if (esc) esc = false;
+      else if (ch === "\\") esc = true;
+      else if (ch === '"') inStr = false;
+      continue;
+    }
+    if (ch === '"') { inStr = true; continue; }
+    if (ch === "{") stack.push(i);
+    else if (ch === "}") {
+      const start = stack.pop();
+      if (start === undefined) continue;
+      const chunk = rawText.slice(start, i + 1);
+      // A candidate object has a name but is NOT the outer wrapper (no "candidates").
+      if (/"name"\s*:/.test(chunk) && !/"candidates"\s*:/.test(chunk)) {
+        try { const o = JSON.parse(chunk); if (o && o.name) out.push(o); } catch {}
+      }
+    }
   }
-  return out.length ? out : null;
+  // De-dupe (a key_stats object won't have name, so only real candidates remain).
+  const seen = new Set();
+  const uniq = out.filter(o => { const k=(o.name||"")+"|"+(o.team||""); if(seen.has(k))return false; seen.add(k); return true; });
+  return uniq.length ? uniq : null;
 }
 
 // ── Cerebras ───────────────────────────────────────────────────────────────
@@ -344,6 +365,18 @@ export default async function handler(req, res) {
       .filter(c => { const k=normName(c.name)+"|"+(c.team||""); if(seen.has(k))return false; seen.add(k); return true; })
       .map(c => ({ ...c, hr_score: Math.round((parseFloat(c.hr_score)||0)*10)/10, projected: projectedAny }))
       .sort((a,b) => b.hr_score - a.hr_score);
+
+    // Diagnostic: if we end up empty, say WHY so the UI shows something useful
+    // instead of a bare "no candidates". rawN = objects AI returned; namedN =
+    // how many had a usable name field after cleaning.
+    if (!out.length) {
+      const rawN = Array.isArray(cands) ? cands.length : 0;
+      const namedN = clean.length;
+      const reason = rawN === 0
+        ? `${source} returned an empty list`
+        : `${source} returned ${rawN} items but ${namedN} had names and 0 matched lineups`;
+      return res.status(200).json({ candidates: [], source, reason });
+    }
     return res.status(200).json({ candidates: out, source });
   };
 
