@@ -159,15 +159,18 @@ function GameView({ games, batters }) {
       <div style={{ display:"flex", gap:6, flexWrap:"wrap", marginBottom:16 }}>
         {games.map(g=>(
           <button key={g.game_id} onClick={()=>setSel(g)} style={{ background:sel?.game_id===g.game_id?"rgba(249,115,22,0.15)":"rgba(255,255,255,0.04)", color:sel?.game_id===g.game_id?"#f97316":"#94a3b8", border:`1px solid ${sel?.game_id===g.game_id?"rgba(249,115,22,0.4)":"rgba(255,255,255,0.08)"}`, borderRadius:8, padding:"6px 13px", fontSize:12, fontWeight:700, cursor:"pointer", fontFamily:"monospace", letterSpacing:"0.03em" }}>
-            {g.away_team}@{g.home_team}
+            {g.live && <span style={{ color:"#f87171" }}>🔴 </span>}{g.away_team}@{g.home_team}
           </button>
         ))}
       </div>
       {sel && (
         <div style={{ background:"rgba(255,255,255,0.03)", border:"1px solid rgba(255,255,255,0.07)", borderRadius:10, padding:"13px 16px", marginBottom:14, display:"flex", justifyContent:"space-between", alignItems:"center", flexWrap:"wrap", gap:8 }}>
           <div>
-            <div style={{ fontSize:20, fontWeight:700, color:"#f8fafc", fontFamily:"Georgia,serif" }}>{sel.away_team} @ {sel.home_team}</div>
-            <div style={{ fontSize:10, color:"#64748b" }}>🏟 {sel.venue} · ⏰ {sel.time_et} ET</div>
+            <div style={{ fontSize:20, fontWeight:700, color:"#f8fafc", fontFamily:"Georgia,serif", display:"flex", alignItems:"center", gap:8 }}>
+              {sel.away_team} @ {sel.home_team}
+              {sel.live && <span style={{ background:"rgba(239,68,68,0.16)", color:"#f87171", border:"1px solid rgba(239,68,68,0.45)", borderRadius:4, padding:"2px 7px", fontSize:9, fontWeight:800, letterSpacing:"0.06em", fontFamily:"monospace" }}>🔴 IN PROGRESS</span>}
+            </div>
+            <div style={{ fontSize:10, color:"#64748b" }}>🏟 {sel.venue} · ⏰ {sel.time_et} ET{sel.live?" · already started":""}</div>
           </div>
           <div style={{ display:"flex", gap:16 }}>
             {[["AWAY SP",sel.away_sp],["HOME SP",sel.home_sp]].map(([lbl,sp])=>(
