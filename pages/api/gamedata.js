@@ -6,6 +6,15 @@ const BASE = "https://statsapi.mlb.com/api/v1";
 
 export const config = { maxDuration: 30 };
 
+// fetch with a per-call timeout. A single slow MLB endpoint should never hang
+// the whole request long enough for the browser to drop it as "Load failed".
+async function fetchT(url, ms = 9000, opts = {}) {
+  const ctrl = new AbortController();
+  const id = setTimeout(() => ctrl.abort(), ms);
+  try { return await fetch(url, { ...opts, signal: ctrl.signal }); }
+  finally { clearTimeout(id); }
+}
+
 const VENUE_ELEV = {
   "Coors Field": 5200, "Chase Field": 1059, "Truist Park": 1050,
   "Kauffman Stadium": 750, "Great American Ball Park": 550, "PNC Park": 730,
@@ -88,7 +97,7 @@ async function getSavant() {
   const players = {};
   try {
     const url = `https://baseballsavant.mlb.com/leaderboard/statcast?type=batter&year=${year}&position=&team=&min=q&csv=true`;
-    const r = await fetch(url, { headers: { "User-Agent": "Mozilla/5.0" } });
+    const r = await fetchT(url, 12000, { headers: { "User-Agent": "Mozilla/5.0" } });
     const text = await r.text();
     const lines = text.split("\n").filter(l => l.trim());
     if (lines.length > 1) {
@@ -128,7 +137,7 @@ export default async function handler(req, res) {
   try {
     const results = {
       lineups: {}, pitcherStats: {}, weather: null, injured: [],
-      lineupsPosted: false, projected: false, gameState: "",
+      lineupsPosted: false, projected: false, gameState: "", oppStaff: {},
       elevation: VENUE_ELEV[Object.keys(VENUE_ELEV).find(k => venue && venue.toLowerCase().includes(k.toLowerCase()))] || 20,
       isNightGame: false, savantUsed: false
     };
@@ -144,7 +153,7 @@ export default async function handler(req, res) {
     async function loadInjuries(teamId) {
       if (!teamId) return;
       try {
-        const r = await fetch(`${BASE}/teams/${teamId}/roster/depthChart`);
+        const r = await fetchT(`${BASE}/teams/${teamId}/roster/depthChart`, 9000);
         const d = await r.json();
         for (const e of d.roster || []) {
           const code = (e.status?.code||"").toUpperCase().trim();
@@ -164,7 +173,7 @@ export default async function handler(req, res) {
     let gameState = "";          // abstract game state: Preview / Live / Final
     if (game_pk) {
       try {
-        const r = await fetch(`${BASE}/game/${game_pk}/boxscore`);
+        const r = await fetchT(`${BASE}/game/${game_pk}/boxscore`, 9000);
         const d = await r.json();
         for (const side of ["away","home"]) {
           const t = d.teams?.[side];
@@ -186,7 +195,7 @@ export default async function handler(req, res) {
     // Pull game status separately so in-progress/final games are always trusted.
     if (game_pk) {
       try {
-        const sr = await fetch(`${BASE}/game/${game_pk}/feed/live`);
+        const sr = await fetchT(`${BASE}/game/${game_pk}/feed/live`, 9000);
         const sd = await sr.json();
         gameState = (sd.gameData?.status?.abstractGameState || "").toLowerCase();
       } catch {}
@@ -204,7 +213,7 @@ export default async function handler(req, res) {
       async function activeHitters(teamId) {
         if (!teamId) return [];
         try {
-          const r = await fetch(`${BASE}/teams/${teamId}/roster/active`);
+          const r = await fetchT(`${BASE}/teams/${teamId}/roster/active`, 9000);
           const d = await r.json();
           return (d.roster||[])
             .filter(e => !["P","SP","RP"].includes(e.position?.abbreviation||"") && !injuredIds.has(e.person?.id))
@@ -226,7 +235,7 @@ export default async function handler(req, res) {
     await Promise.all([["away", away_sp_id], ["home", home_sp_id]].map(async ([key, pid]) => {
       if (!pid || pid === "null") return;
       try {
-        const r = await fetch(`${BASE}/people/${pid}`);
+        const r = await fetchT(`${BASE}/people/${pid}`, 9000);
         const d = await r.json();
         spThrows[key] = d.people?.[0]?.pitchHand?.code || "R";
       } catch { spThrows[key] = "R"; }
@@ -243,7 +252,7 @@ export default async function handler(req, res) {
     await Promise.all(allPlayers.map(async (p) => {
       const out = {};
       try {
-        const r = await fetch(`${BASE}/people/${p.id}?hydrate=stats(group=hitting,type=season,season=2026)`);
+        const r = await fetchT(`${BASE}/people/${p.id}?hydrate=stats(group=hitting,type=season,season=2026)`, 9000);
         const d = await r.json();
         const person = d.people?.[0];
         if (person?.batSide?.code) p.bats = person.batSide.code;
@@ -260,31 +269,34 @@ export default async function handler(req, res) {
       } catch {}
       try {
         const start=daysAgoISO(14), end=daysAgoISO(0);
-        const r = await fetch(`${BASE}/people/${p.id}/stats?stats=byDateRange&group=hitting&startDate=${start}&endDate=${end}&season=2026`);
+        const r = await fetchT(`${BASE}/people/${p.id}/stats?stats=byDateRange&group=hitting&startDate=${start}&endDate=${end}&season=2026`, 9000);
         const d = await r.json();
         const s = d.stats?.[0]?.splits?.[0]?.stat;
         if (s) { out.recent_hr=s.homeRuns||0; out.recent_avg=s.avg||".000"; out.recent_slg=s.slg||".000"; out.recent_ops=s.ops||".000"; out.recent_ab=s.atBats||0; out.recent_iso=(parseFloat(s.slg||0)-parseFloat(s.avg||0)).toFixed(3); }
       } catch {}
-      try {
-        const r = await fetch(`${BASE}/people/${p.id}/stats?stats=statSplits&sitCodes=${results.isNightGame?"n":"d"}&group=hitting&season=2026`);
-        const d = await r.json();
-        const s = d.stats?.[0]?.splits?.[0]?.stat;
-        if (s) { out.split_ops=s.ops||".000"; out.split_hr=s.homeRuns||0; out.split_label=results.isNightGame?"night":"day"; }
-      } catch {}
-      // Platoon split vs the handedness of the starter this batter actually faces.
+      // ONE splits call covering BOTH day/night AND platoon, to minimize the
+      // number of API requests per player (avoids overloading the pipeline).
       try {
         const oppHand = oppHandForSide[sideOf[p.id]] || "R";
-        const sit = oppHand === "L" ? "vl" : "vr"; // vs LHP / vs RHP
-        const r = await fetch(`${BASE}/people/${p.id}/stats?stats=statSplits&sitCodes=${sit}&group=hitting&season=2026`);
+        const platSit = oppHand === "L" ? "vl" : "vr";   // vs LHP / vs RHP
+        const dnSit = results.isNightGame ? "n" : "d";    // day / night
+        const r = await fetchT(`${BASE}/people/${p.id}/stats?stats=statSplits&sitCodes=${dnSit},${platSit}&group=hitting&season=2026`, 9000);
         const d = await r.json();
-        const s = d.stats?.[0]?.splits?.[0]?.stat;
-        if (s) {
-          out.plat_hand = oppHand;
-          out.plat_ops = s.ops||".000";
-          out.plat_slg = s.slg||".000";
-          out.plat_hr = s.homeRuns||0;
-          out.plat_ab = s.atBats||0;
-          out.plat_iso = (parseFloat(s.slg||0)-parseFloat(s.avg||0)).toFixed(3);
+        const splits = d.stats?.[0]?.splits || [];
+        for (const sp of splits) {
+          const code = (sp.split?.code || "").toLowerCase();
+          const s = sp.stat || {};
+          if (code === dnSit) {
+            out.split_ops = s.ops||".000"; out.split_hr = s.homeRuns||0;
+            out.split_label = results.isNightGame ? "night" : "day";
+          } else if (code === platSit) {
+            out.plat_hand = oppHand;
+            out.plat_ops = s.ops||".000";
+            out.plat_slg = s.slg||".000";
+            out.plat_hr = s.homeRuns||0;
+            out.plat_ab = s.atBats||0;
+            out.plat_iso = (parseFloat(s.slg||0)-parseFloat(s.avg||0)).toFixed(3);
+          }
         }
       } catch {}
       const sv = savant[(p.name||"").toLowerCase()];
@@ -316,7 +328,7 @@ export default async function handler(req, res) {
       if (!pid || pid==="null") continue;
       const ps = {};
       try {
-        const r = await fetch(`${BASE}/people/${pid}?hydrate=stats(group=pitching,type=season,season=2026)`);
+        const r = await fetchT(`${BASE}/people/${pid}?hydrate=stats(group=pitching,type=season,season=2026)`, 9000);
         const d = await r.json();
         const s = d.people?.[0]?.stats?.[0]?.splits?.[0]?.stat;
         if (s) {
@@ -329,7 +341,7 @@ export default async function handler(req, res) {
       } catch {}
       try {
         const start=daysAgoISO(21), end=daysAgoISO(0);
-        const r = await fetch(`${BASE}/people/${pid}/stats?stats=byDateRange&group=pitching&startDate=${start}&endDate=${end}&season=2026`);
+        const r = await fetchT(`${BASE}/people/${pid}/stats?stats=byDateRange&group=pitching&startDate=${start}&endDate=${end}&season=2026`, 9000);
         const d = await r.json();
         const s = d.stats?.[0]?.splits?.[0]?.stat;
         if (s) { ps.recent_hr9=s.homeRunsPer9||"N/A"; ps.recent_era=s.era||"N/A"; }
@@ -337,10 +349,45 @@ export default async function handler(req, res) {
       results.pitcherStats[key] = ps;
     }
 
+    // Opposing-STAFF home-run vulnerability (the signal today's misses needed).
+    // A hitter faces the starter for ~5 innings and that team's BULLPEN the rest,
+    // so unexpected HRs cluster against teams whose overall/bullpen staff is
+    // homer-prone or getting hit hard lately. We fetch each team's full-staff
+    // pitching (season) and recent 14-day pitching, then attach it to the side
+    // whose hitters benefit: away hitters face the HOME staff and vice-versa.
+    async function teamStaff(teamId) {
+      const o = {};
+      if (!teamId || teamId === "null") return o;
+      try {
+        const r = await fetchT(`${BASE}/teams/${teamId}/stats?stats=season&group=pitching&season=2026`, 9000);
+        const d = await r.json();
+        const s = d.stats?.[0]?.splits?.[0]?.stat;
+        if (s) {
+          o.staff_hr9 = s.homeRunsPer9 || "N/A";
+          o.staff_era = s.era || "N/A";
+          const go=s.groundOuts||0, ao=s.airOuts||0;
+          if (go+ao>0) o.staff_fb_pct = Math.round(ao/(go+ao)*100);
+        }
+      } catch {}
+      try {
+        const start=daysAgoISO(14), end=daysAgoISO(0);
+        const r = await fetchT(`${BASE}/teams/${teamId}/stats?stats=byDateRange&group=pitching&startDate=${start}&endDate=${end}&season=2026`, 9000);
+        const d = await r.json();
+        const s = d.stats?.[0]?.splits?.[0]?.stat;
+        if (s) { o.staff_recent_hr9 = s.homeRunsPer9 || "N/A"; o.staff_recent_era = s.era || "N/A"; }
+      } catch {}
+      return o;
+    }
+    const [awayStaff, homeStaff] = await Promise.all([
+      teamStaff(away_team_id), teamStaff(home_team_id)
+    ]);
+    // oppStaff[side] = the staff that side's hitters face.
+    results.oppStaff = { away: homeStaff, home: awayStaff };
+
     // Weather
     const coords = Object.entries(VENUE_COORDS).find(([k]) => venue && venue.toLowerCase().includes(k.toLowerCase()))?.[1] || [40.7128,-74.0060];
     try {
-      const r = await fetch(`https://api.open-meteo.com/v1/forecast?latitude=${coords[0]}&longitude=${coords[1]}&hourly=temperature_2m,windspeed_10m,winddirection_10m&temperature_unit=fahrenheit&windspeed_unit=mph&forecast_days=1&timezone=auto`);
+      const r = await fetchT(`https://api.open-meteo.com/v1/forecast?latitude=${coords[0]}&longitude=${coords[1]}&hourly=temperature_2m,windspeed_10m,winddirection_10m&temperature_unit=fahrenheit&windspeed_unit=mph&forecast_days=1&timezone=auto`, 9000);
       const d = await r.json();
       const idx = results.isNightGame ? 19 : 13;
       const wdir = d.hourly?.winddirection_10m?.[idx]||180;
