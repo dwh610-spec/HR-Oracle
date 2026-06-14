@@ -41,13 +41,26 @@ function gameBlock(game, gameData) {
   const aFb = aP.fb_pct!=null ? ` FB%${aP.fb_pct}` : "";
   const hFb = hP.fb_pct!=null ? ` FB%${hP.fb_pct}` : "";
 
+  // Opposing full-staff HR vulnerability (incl. bullpen) — away hitters face it
+  // from the home staff and vice-versa. Recent HR/9 flags a pen getting hit now.
+  const oppA = gameData?.oppStaff?.away || {}; // staff AWAY hitters face (home team)
+  const oppH = gameData?.oppStaff?.home || {}; // staff HOME hitters face (away team)
+  const staffStr = (o) => {
+    if (!o || o.staff_hr9==null) return "";
+    let s = ` | OppStaff HR/9 ${o.staff_hr9}`;
+    if (o.staff_recent_hr9!=null) s += ` (L14 ${o.staff_recent_hr9})`;
+    if (o.staff_era!=null) s += ` ERA${o.staff_era}`;
+    if (o.staff_fb_pct!=null) s += ` FB%${o.staff_fb_pct}`;
+    return s;
+  };
+
   return `=== ${game.away_team}@${game.home_team} @${game.venue} ${slot} elev${elevation}${isProjected?" [PROJ]":""}
 ASP ${game.away_sp.name}(${game.away_sp.throws}) ERA${aP.era||game.away_sp.era} HR/9 ${aP.hr9||"?"}${aFb}
 HSP ${game.home_sp.name}(${game.home_sp.throws}) ERA${hP.era||game.home_sp.era} HR/9 ${hP.hr9||"?"}${hFb}
 Wx:${weather.summary||"?"}${weather.wind_effect?` [${weather.wind_effect}]`:""}
-AWAY(vs ${game.home_sp.throws}HP):
+AWAY(vs ${game.home_sp.throws}HP${staffStr(oppA)}):
 ${fmt(awayList)}
-HOME(vs ${game.away_sp.throws}HP):
+HOME(vs ${game.away_sp.throws}HP${staffStr(oppH)}):
 ${fmt(homeList)}`;
 }
 
@@ -55,7 +68,7 @@ const INSTRUCTIONS_HEAD = `You are an elite MLB home-run prediction model. Below
 
 Return the strongest 2-3 hitters from each game. Games tagged [PROJ] have projected (not confirmed) lineups — still analyze them.
 
-SCORING PRIORITY: (1) RECENT 14-day form DOMINATES — weight recent ~60%, season ~40%; a hot bat beats a cold star. (2) PLATOON split — use the hitter's "vsLHP/vsRHP" line (OPS/ISO/HR) against the starter he actually faces; a strong platoon edge is a major boost. (3) power metrics (barrel%, EV). (4) batted-ball shape — high batter FB% (fly-ball hitter) + high pitcher FB% (fly-ball pitcher) together is a prime HR setup; a ground-ball hitter rarely homers regardless of power. (5) pitcher HR/9 and FB%. (6) WIND: "OUT to CF" strongly boosts HR, "IN from CF" strongly suppresses it, indoor/roof is neutral. (7) park/elevation (high elev boosts HR). (8) lineup spot — hitters batting 1-5 get more PAs and better pitches to hit than 6-9; weight top-of-order bats up slightly. (9) temperature — warm air (>78°F) adds carry. Reward hot+powerful+favorable-platoon+wind-out 85+, push cold or wind-in or ground-ball bats into 30s-40s. Use decimal hr_score to break ties.`;
+SCORING PRIORITY: (1) RECENT 14-day form DOMINATES — weight recent ~60%, season ~40%; a hot bat beats a cold star. (2) PLATOON split — use the hitter's "vsLHP/vsRHP" line (OPS/ISO/HR) against the starter he actually faces; a strong platoon edge is a major boost. (3) OPPOSING STAFF HR vulnerability — the "OppStaff HR/9" shown per lineup is the WHOLE staff that side faces (starter + bullpen). A high staff HR/9 (>1.3), high recent-L14 HR/9, or high staff ERA means HRs get distributed across that lineup — boost EVERY hitter facing a homer-prone or struggling staff, including non-stars, since unexpected HRs cluster against bad pitching. (4) power metrics (barrel%, EV). (5) batted-ball shape — high batter FB% (fly-ball hitter) + high pitcher/staff FB% together is a prime HR setup; a ground-ball hitter rarely homers regardless of power. (6) starter HR/9 and FB%. (7) WIND: "OUT to CF" strongly boosts HR, "IN from CF" strongly suppresses it, indoor/roof is neutral. (8) park/elevation (high elev boosts HR). (9) lineup spot — hitters batting 1-5 get more PAs and better pitches than 6-9. (10) temperature — warm air (>78°F) adds carry. Reward hot+powerful+favorable-platoon+weak-opposing-staff+wind-out 85+, push cold or wind-in or ground-ball bats facing strong staffs into 30s-40s. Use decimal hr_score to break ties.`;
 
 const INSTRUCTIONS_TAIL = `Respond with ONLY JSON (no markdown):
 {"candidates":[{"name":"","team":"","bats":"L","lineup_spot":3,"opposing_sp":"","sp_throws":"R","pitcher_grade":"AVERAGE","batter_grade":"HOT","hr_score":72.4,"hr_prob":"14%","key_stats":[{"label":"L14 HR","value":"4"},{"label":"L14 ISO","value":".310"},{"label":"vsRHP OPS","value":".940"},{"label":"Brl%","value":"15"}],"summary":"brief — mention platoon edge, wind, or FB-shape when relevant"}]}
