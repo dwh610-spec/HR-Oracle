@@ -344,16 +344,19 @@ export default async function handler(req, res) {
   if (!Array.isArray(games) || !games.length)
     return res.status(400).json({ error: "no games provided" });
 
-  // Build allow-list + blocks.
+  // Build allow-list + blocks. Track projected status PER PLAYER (keyed by their
+  // own game), NOT slate-wide — otherwise one game lacking a posted lineup would
+  // mark EVERY candidate (even in-progress games) as projected.
   const validLower = new Set();
   const blocks = [];
-  let projectedAny = false;
+  const projByPlayer = {}; // normalizedName|team -> true if that player's game is projected
   for (const { game, gameData } of games) {
     const a = (gameData?.lineups?.away || []).slice(0, 9);
     const h = (gameData?.lineups?.home || []).slice(0, 9);
     if (a.length < 3 || h.length < 3) continue;
-    [...a, ...h].forEach(p => validLower.add((p.name||"").toLowerCase()));
-    if (gameData?.projected) projectedAny = true;
+    const gameProjected = !!gameData?.projected;
+    [...a].forEach(p => { validLower.add((p.name||"").toLowerCase()); projByPlayer[`${(p.name||"").toLowerCase()}|${game.away_team}`] = gameProjected; });
+    [...h].forEach(p => { validLower.add((p.name||"").toLowerCase()); projByPlayer[`${(p.name||"").toLowerCase()}|${game.home_team}`] = gameProjected; });
     blocks.push(gameBlock(game, gameData));
   }
   if (!blocks.length)
@@ -391,9 +394,24 @@ export default async function handler(req, res) {
     // trust the AI rather than show an empty board (better partial than blank).
     if (!kept.length && clean.length) kept = clean;
 
+    // Resolve each candidate's projected status from ITS OWN game. Try exact
+    // name|team, then any key matching the player's name (handles team-abbrev
+    // mismatches). Default false = treat as confirmed rather than falsely PROJ.
+    const projFor = (c) => {
+      const nm = (c.name||"").toLowerCase();
+      const exact = projByPlayer[`${nm}|${c.team||""}`];
+      if (exact !== undefined) return exact;
+      const lastNm = normName(c.name).split(" ").pop();
+      for (const [k, v] of Object.entries(projByPlayer)) {
+        const keyName = k.split("|")[0];
+        if (keyName === nm || normName(keyName).split(" ").pop() === lastNm) return v;
+      }
+      return false;
+    };
+
     const out = kept
       .filter(c => { const k=normName(c.name)+"|"+(c.team||""); if(seen.has(k))return false; seen.add(k); return true; })
-      .map(c => ({ ...c, hr_score: Math.round((parseFloat(c.hr_score)||0)*10)/10, projected: projectedAny }))
+      .map(c => ({ ...c, hr_score: Math.round((parseFloat(c.hr_score)||0)*10)/10, projected: projFor(c) }))
       .sort((a,b) => b.hr_score - a.hr_score);
 
     // Diagnostic: if we end up empty, say WHY so the UI shows something useful
