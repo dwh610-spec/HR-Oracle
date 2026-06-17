@@ -94,7 +94,7 @@ ${fmt(homeList)}`;
 
 const INSTRUCTIONS_HEAD = `You are an elite MLB home-run prediction model. Below are MLB games with lineups and stats. Identify the TOP HOME RUN CANDIDATES.
 
-Return the strongest 2-3 hitters from each game. Games tagged [PROJ] have projected (not confirmed) lineups — still analyze them.
+Return ONLY the 12 STRONGEST home-run candidates across the ENTIRE slate (not per game) — the single best plays, ranked. Skip marginal names. Games tagged [PROJ] have projected (not confirmed) lineups — still consider them.
 
 SCORING PRIORITY: (1) RECENT PITCHING COLLAPSE is now co-equal with batter form — a starter with a high RECENT (L21) ERA/HR-9/BAA, OR an opposing staff with a high L14 HR/9 & ERA, means HRs cluster across the WHOLE lineup. When you see a starter being shelled lately or a gassed/homer-prone staff, boost EVERY decent bat in that lineup (including non-stars/bottom-of-order), because that's exactly where surprise HRs come from. Weight RECENT pitching form far above season pitching numbers — season lags for call-ups and recent strugglers. (2) PITCH-TYPE MATCHUP (PITCHMIX) — critical for non-obvious plays: each batter line shows the pitch families the starter throws (FB/BRK/OFF) with that batter's SLG vs the family (B.slg) and the pitcher's run-value-allowed/100 on it (P.rv, higher=more hittable). A hitter who SLUGS HIGH (.550+) vs a family the starter throws a lot AND gets hit on is a PRIME pick even with a modest season HR total. Do NOT rank by season HRs alone — a mid-power hitter with a great pitch-type matchup should outrank a star facing pitches he can't elevate. (3) RECENT 14-day batter form — a hot bat beats a cold star; weight recent ~60% vs season ~40%. (4) PLATOON split — the hitter's vsLHP/vsRHP line vs the hand he faces. (5) power metrics (barrel%, EV). (6) batted-ball shape — high batter FB% + high pitcher/staff FB% is a prime HR setup; a ground-ball hitter rarely homers. (7) HR-ENV — each game header shows ONE HR-ENV multiplier (1.00=avg) already combining park, elevation, temperature, and wind; >1.08 boosts ALL hitters in that game, <0.93 suppresses them. (8) ParkHR — a batter may show a personalized park factor for HIS handedness (e.g. a lefty in a short-RF park); >1.10 is a meaningful boost, <0.92 a meaningful drag, and this is more specific than the game-wide number. (9) lineup spot 1-5 > 6-9. (10) HR-ENV already includes temp & wind — do NOT double-count them. Actively diversify — reward strong pitch-type and platoon matchups so the board is NOT just the same season-HR leaders every day. Reward (hot bat + collapsing/homer-prone pitching + great pitch matchup + wind-out) 85+. Push cold/ground-ball bats facing strong RECENT pitching into the 30s. Use decimal hr_score to break ties.
 
@@ -222,7 +222,7 @@ async function callCerebras(prompt, key) {
 }
 
 // ── Gemini ─────────────────────────────────────────────────────────────────
-async function callGemini(model, prompt, key) {
+async function callGemini(model, prompt, key, timeoutMs) {
   const cleanKey = encodeURIComponent((key || "").trim());
   const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${cleanKey}`;
   let r;
@@ -231,9 +231,9 @@ async function callGemini(model, prompt, key) {
       method:"POST", headers:{ "Content-Type":"application/json" },
       body: JSON.stringify({
         contents: [{ parts: [{ text: prompt }] }],
-        generationConfig: { temperature: 0.3, maxOutputTokens: 16000, responseMimeType: "application/json" }
+        generationConfig: { temperature: 0.3, maxOutputTokens: 8000, responseMimeType: "application/json" }
       })
-    }, 45000);
+    }, timeoutMs || 30000);
   } catch(e) {
     if (e.name === "AbortError") return { ok:false, kind:"timeout", msg:`${model} timed out` };
     return { ok:false, kind:"network", msg:`${model}: ${e.message}` };
@@ -275,7 +275,7 @@ async function callOpenRouter(model, prompt, key, timeoutMs) {
       body: JSON.stringify({
         model,
         temperature: 0.3,
-        max_tokens: 16000,
+        max_tokens: 8000,
         response_format: { type: "json_object" },
         messages: [{ role:"user", content: prompt }]
       })
@@ -438,7 +438,9 @@ export default async function handler(req, res) {
     const prompt = buildPrompt(blocks);
     for (const model of ["gemini-2.5-flash-lite", "gemini-2.5-flash"]) {
       if (timeLeft() < 12000) break;
-      const r = await callGemini(model, prompt, GEMINI_KEY);
+      // Give the call almost all remaining time, minus a small safety margin,
+      // so it returns (or aborts cleanly) before Vercel kills the function.
+      const r = await callGemini(model, prompt, GEMINI_KEY, Math.max(10000, timeLeft() - 6000));
       if (r.ok) return finalize(r.candidates, model);
       lastMsg = r.msg;
       // No long in-model retries here — falling to the next model/provider is
