@@ -35,11 +35,11 @@ function gameBlock(game, gameData) {
     const air = (s.fb_pct!=null) ? ` FB%${s.fb_pct}` : "";
     // Platoon line: this hitter's numbers vs the hand of the SP he actually faces.
     const plat = s.plat_ops ? ` vs${s.plat_hand}HP:OPS${s.plat_ops}HR${s.plat_hr}ISO${s.plat_iso}(${s.plat_ab}ab)` : "";
-    return `${p.name}(${p.bats}) #${p.lineup_spot||"?"} HR${s.hr||0} OPS${s.ops||"?"} ISO${s.iso||"?"}${air} L14:HR${s.recent_hr??0}ISO${s.recent_iso||"?"}OPS${s.recent_ops||"?"}(${s.recent_ab||0}ab)${power}${plat}`;
+    // Pitch-type matchup: per family the starter throws — B.slg = this batter's
+    // slug vs that family, P.rv = pitcher's run value allowed/100 (higher=hittable).
+    const pm = s.pitch_matchup ? ` | PITCHMIX ${s.pitch_matchup}` : "";
+    return `${p.name}(${p.bats}) #${p.lineup_spot||"?"} HR${s.hr||0} OPS${s.ops||"?"} ISO${s.iso||"?"}${air} L14:HR${s.recent_hr??0}ISO${s.recent_iso||"?"}OPS${s.recent_ops||"?"}(${s.recent_ab||0}ab)${power}${plat}${pm}`;
   }).join("\n");
-
-  const aFb = aP.fb_pct!=null ? ` FB%${aP.fb_pct}` : "";
-  const hFb = hP.fb_pct!=null ? ` FB%${hP.fb_pct}` : "";
 
   // Opposing full-staff HR vulnerability (incl. bullpen) — away hitters face it
   // from the home staff and vice-versa. Recent HR/9 flags a pen getting hit now.
@@ -47,16 +47,40 @@ function gameBlock(game, gameData) {
   const oppH = gameData?.oppStaff?.home || {}; // staff HOME hitters face (away team)
   const staffStr = (o) => {
     if (!o || o.staff_hr9==null) return "";
-    let s = ` | OppStaff HR/9 ${o.staff_hr9}`;
-    if (o.staff_recent_hr9!=null) s += ` (L14 ${o.staff_recent_hr9})`;
-    if (o.staff_era!=null) s += ` ERA${o.staff_era}`;
+    // Lead with RECENT staff form — a staff getting shelled NOW is the strongest
+    // cluster-HR signal (season line lags for call-ups/recent strugglers).
+    let s = "";
+    if (o.staff_recent_hr9!=null) s += ` | OppStaff L14 HR/9 ${o.staff_recent_hr9}`;
+    if (o.staff_recent_era!=null) s += ` L14 ERA${o.staff_recent_era}`;
+    s += ` (season HR/9 ${o.staff_hr9}`;
     if (o.staff_fb_pct!=null) s += ` FB%${o.staff_fb_pct}`;
+    s += ")";
+    return s;
+  };
+
+  // Starter line: recent (last-21-day) form FIRST, since a starter being hit
+  // hard right now predicts HRs better than his season line.
+  const arsA = gameData?.pitcherArsenal?.away;
+  const arsH = gameData?.pitcherArsenal?.home;
+  const arsStr = (a) => {
+    if (!a) return "";
+    const fams = ["FB","BRK","OFF"].filter(f=>a[f]&&a[f].usage>=12)
+      .map(f=>`${f}${Math.round(a[f].usage)}%${a[f].rv!=null?`(rv${a[f].rv.toFixed(1)})`:""}`);
+    return fams.length ? ` arsenal:${fams.join("/")}` : "";
+  };
+  const spLine = (label, sp, p, ars) => {
+    let s = `${label} ${sp.name}(${sp.throws})`;
+    if (p.recent_era!=null && p.recent_era!=="N/A")
+      s += ` L21: ERA${p.recent_era} HR/9 ${p.recent_hr9||"?"} BAA${p.recent_baa||"?"} (${p.recent_hr||0}HR/${p.recent_ip||"?"}ip)`;
+    s += ` | season ERA${p.era||sp.era} HR/9 ${p.hr9||"?"}`;
+    if (p.fb_pct!=null) s += ` FB%${p.fb_pct}`;
+    s += arsStr(ars);
     return s;
   };
 
   return `=== ${game.away_team}@${game.home_team} @${game.venue} ${slot} elev${elevation}${isProjected?" [PROJ]":""}
-ASP ${game.away_sp.name}(${game.away_sp.throws}) ERA${aP.era||game.away_sp.era} HR/9 ${aP.hr9||"?"}${aFb}
-HSP ${game.home_sp.name}(${game.home_sp.throws}) ERA${hP.era||game.home_sp.era} HR/9 ${hP.hr9||"?"}${hFb}
+${spLine("ASP", game.away_sp, aP, arsA)}
+${spLine("HSP", game.home_sp, hP, arsH)}
 Wx:${weather.summary||"?"}${weather.wind_effect?` [${weather.wind_effect}]`:""}
 AWAY(vs ${game.home_sp.throws}HP${staffStr(oppA)}):
 ${fmt(awayList)}
@@ -68,7 +92,9 @@ const INSTRUCTIONS_HEAD = `You are an elite MLB home-run prediction model. Below
 
 Return the strongest 2-3 hitters from each game. Games tagged [PROJ] have projected (not confirmed) lineups — still analyze them.
 
-SCORING PRIORITY: (1) RECENT 14-day form DOMINATES — weight recent ~60%, season ~40%; a hot bat beats a cold star. (2) PLATOON split — use the hitter's "vsLHP/vsRHP" line (OPS/ISO/HR) against the starter he actually faces; a strong platoon edge is a major boost. (3) OPPOSING STAFF HR vulnerability — the "OppStaff HR/9" shown per lineup is the WHOLE staff that side faces (starter + bullpen). A high staff HR/9 (>1.3), high recent-L14 HR/9, or high staff ERA means HRs get distributed across that lineup — boost EVERY hitter facing a homer-prone or struggling staff, including non-stars, since unexpected HRs cluster against bad pitching. (4) power metrics (barrel%, EV). (5) batted-ball shape — high batter FB% (fly-ball hitter) + high pitcher/staff FB% together is a prime HR setup; a ground-ball hitter rarely homers regardless of power. (6) starter HR/9 and FB%. (7) WIND: "OUT to CF" strongly boosts HR, "IN from CF" strongly suppresses it, indoor/roof is neutral. (8) park/elevation (high elev boosts HR). (9) lineup spot — hitters batting 1-5 get more PAs and better pitches than 6-9. (10) temperature — warm air (>78°F) adds carry. Reward hot+powerful+favorable-platoon+weak-opposing-staff+wind-out 85+, push cold or wind-in or ground-ball bats facing strong staffs into 30s-40s. Use decimal hr_score to break ties.`;
+SCORING PRIORITY: (1) RECENT PITCHING COLLAPSE is now co-equal with batter form — a starter with a high RECENT (L21) ERA/HR-9/BAA, OR an opposing staff with a high L14 HR/9 & ERA, means HRs cluster across the WHOLE lineup. When you see a starter being shelled lately or a gassed/homer-prone staff, boost EVERY decent bat in that lineup (including non-stars/bottom-of-order), because that's exactly where surprise HRs come from. Weight RECENT pitching form far above season pitching numbers — season lags for call-ups and recent strugglers. (2) PITCH-TYPE MATCHUP (PITCHMIX) — critical for non-obvious plays: each batter line shows the pitch families the starter throws (FB/BRK/OFF) with that batter's SLG vs the family (B.slg) and the pitcher's run-value-allowed/100 on it (P.rv, higher=more hittable). A hitter who SLUGS HIGH (.550+) vs a family the starter throws a lot AND gets hit on is a PRIME pick even with a modest season HR total. Do NOT rank by season HRs alone — a mid-power hitter with a great pitch-type matchup should outrank a star facing pitches he can't elevate. (3) RECENT 14-day batter form — a hot bat beats a cold star; weight recent ~60% vs season ~40%. (4) PLATOON split — the hitter's vsLHP/vsRHP line vs the hand he faces. (5) power metrics (barrel%, EV). (6) batted-ball shape — high batter FB% + high pitcher/staff FB% is a prime HR setup; a ground-ball hitter rarely homers. (7) WIND: "OUT to CF" boosts, "IN from CF" suppresses, roof neutral. (8) park/elevation. (9) lineup spot 1-5 > 6-9. (10) warm temp (>78°F) adds carry. Actively diversify — reward strong pitch-type and platoon matchups so the board is NOT just the same season-HR leaders every day. Reward (hot bat + collapsing/homer-prone pitching + great pitch matchup + wind-out) 85+. Push cold/ground-ball bats facing strong RECENT pitching into the 30s. Use decimal hr_score to break ties.
+
+IMPORTANT EXPECTATION: HRs are rare, high-variance events — even the single best play on a slate is only ~8-13% to homer. Do NOT inflate scores to look confident; a realistic top play is ~70-85, not 99. Spread scores honestly so the ranking reflects true separation.`;
 
 const INSTRUCTIONS_TAIL = `Respond with ONLY JSON (no markdown):
 {"candidates":[{"name":"","team":"","bats":"L","lineup_spot":3,"opposing_sp":"","sp_throws":"R","pitcher_grade":"AVERAGE","batter_grade":"HOT","hr_score":72.4,"hr_prob":"14%","key_stats":[{"label":"L14 HR","value":"4"},{"label":"L14 ISO","value":".310"},{"label":"vsRHP OPS","value":".940"},{"label":"Brl%","value":"15"}],"summary":"brief — mention platoon edge, wind, or FB-shape when relevant"}]}
