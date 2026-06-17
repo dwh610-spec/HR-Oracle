@@ -130,6 +130,110 @@ async function getSavant() {
 
 function daysAgoISO(n){ const d=new Date(); d.setDate(d.getDate()-n); return d.toISOString().split("T")[0]; }
 
+// ── Pitch-type matchup data (Baseball Savant "pitch-arsenal-stats") ──────────
+// Two leaderboards, one per side. Each has MULTIPLE rows per player (one per
+// pitch type). We bucket the individual pitch types into three families that
+// matter for HR matchups, so the prompt stays compact:
+//   FB  = 4-seam, sinker, cutter, fastball       (FF, SI, FC, FA)
+//   BRK = slider, curve, sweeper, slurve, knuckle-curve  (SL, CU, ST, SV, KC)
+//   OFF = changeup, splitter, screwball          (CH, FS, SC)
+// For PITCHERS we track usage% and run-value-per-100 by family (a high RV/100
+// against = a hittable "meatball" pitch). For BATTERS we track run-value-per-100
+// and slug by family (how much damage they do vs each family).
+const PITCH_FAMILY = {
+  FF:"FB", FA:"FB", SI:"FB", FC:"FB", FT:"FB",
+  SL:"BRK", CU:"BRK", ST:"BRK", SV:"BRK", KC:"BRK", CS:"BRK", SC:"BRK",
+  CH:"OFF", FS:"OFF", FO:"OFF"
+};
+let ARSENAL_CACHE = { ts:0, pitcher:null, batter:null };
+
+async function getArsenals() {
+  if (ARSENAL_CACHE.pitcher && Date.now()-ARSENAL_CACHE.ts < 10*60*1000) {
+    return { pitcher: ARSENAL_CACHE.pitcher, batter: ARSENAL_CACHE.batter };
+  }
+  const year = new Date().getFullYear();
+  const parse = async (type) => {
+    const out = {}; // name -> { FB:{usage,rv,slg,n}, BRK:{...}, OFF:{...} }
+    try {
+      const url = `https://baseballsavant.mlb.com/leaderboard/pitch-arsenal-stats?type=${type}&pitchType=&year=${year}&team=&min=10&csv=true`;
+      const r = await fetchT(url, 12000, { headers:{ "User-Agent":"Mozilla/5.0" } });
+      const text = await r.text();
+      const lines = text.split("\n").filter(l=>l.trim());
+      if (lines.length < 2) return out;
+      const H = lines[0].split(",").map(h=>h.replace(/"/g,"").trim().toLowerCase());
+      const col = (...names) => H.findIndex(h => names.some(n=>h===n||h.includes(n)));
+      const iName = col("last_name, first_name","player_name","name");
+      const iPitch = col("pitch_type","pitch");
+      const iUsage = col("pitch_usage","pitch_per","usage");
+      const iRV = col("run_value_per_100","rv_per_100","run_value_per100");
+      const iSlg = col("slg","slugging");
+      const iWoba = col("woba");
+      for (let i=1;i<lines.length;i++){
+        const cols = lines[i].match(/("([^"]*)"|[^,]+)/g)||[];
+        const c = cols.map(x=>x.replace(/"/g,"").trim());
+        let name = c[iName]||"";
+        if (name.includes(",")){ const [last,first]=name.split(",").map(s=>s.trim()); name=`${first} ${last}`; }
+        if (!name) continue;
+        const fam = PITCH_FAMILY[(c[iPitch]||"").toUpperCase()];
+        if (!fam) continue;
+        const key = name.toLowerCase();
+        out[key] = out[key] || { FB:null, BRK:null, OFF:null };
+        const usage = iUsage>=0 ? parseFloat(c[iUsage])||0 : 0;
+        const rv = iRV>=0 ? parseFloat(c[iRV]) : null;
+        const slg = iSlg>=0 ? parseFloat(c[iSlg]) : null;
+        const woba = iWoba>=0 ? parseFloat(c[iWoba]) : null;
+        // Merge multiple pitch types in the same family, weighting by usage.
+        const prev = out[key][fam];
+        if (!prev) {
+          out[key][fam] = { usage, rv, slg, woba, w: usage||1 };
+        } else {
+          const w = prev.w + (usage||1);
+          out[key][fam] = {
+            usage: prev.usage + usage,
+            rv: rv!=null && prev.rv!=null ? (prev.rv*prev.w + rv*(usage||1))/w : (prev.rv ?? rv),
+            slg: slg!=null && prev.slg!=null ? (prev.slg*prev.w + slg*(usage||1))/w : (prev.slg ?? slg),
+            woba: woba!=null && prev.woba!=null ? (prev.woba*prev.w + woba*(usage||1))/w : (prev.woba ?? woba),
+            w
+          };
+        }
+      }
+    } catch {}
+    return out;
+  };
+  const [pitcher, batter] = await Promise.all([parse("pitcher"), parse("batter")]);
+  ARSENAL_CACHE = { ts: Date.now(), pitcher, batter };
+  return { pitcher, batter };
+}
+
+// Build the batter-vs-this-pitcher matchup signal: for each pitch family the
+// STARTER actually throws a lot, how much damage does THIS hitter do vs it, and
+// is the pitch hittable (high RV-against)? Returns a compact string + a score.
+function pitchMatchup(batterArsenal, pitcherArsenal) {
+  if (!batterArsenal || !pitcherArsenal) return null;
+  const fams = ["FB","BRK","OFF"];
+  const parts = [];
+  let edge = 0, seen = 0;
+  for (const f of fams) {
+    const pa = pitcherArsenal[f], ba = batterArsenal[f];
+    if (!pa || !pa.usage || pa.usage < 12) continue; // only pitches he throws often
+    seen++;
+    const usagePct = Math.round(pa.usage);
+    // Batter damage vs family (slug) and pitcher vulnerability (rv allowed/100).
+    const bslg = ba && ba.slg!=null ? ba.slg.toFixed(3) : "?";
+    const pRv = pa.rv!=null ? pa.rv.toFixed(1) : "?";
+    parts.push(`${f}${usagePct}%(B.slg${bslg}/P.rv${pRv})`);
+    // Edge heuristic: batter slugs well vs a pitch the pitcher throws a lot and
+    // gets hit on. Higher = better HR matchup.
+    if (ba && ba.slg!=null) {
+      let e = (ba.slg - 0.400) * pa.usage/100 * 2;        // batter power vs family
+      if (pa.rv!=null) e += Math.max(0, pa.rv) * pa.usage/100 * 0.15; // hittable pitch
+      edge += e;
+    }
+  }
+  if (!seen) return null;
+  return { str: parts.join(" "), edge: Math.round(edge*100)/100 };
+}
+
 export default async function handler(req, res) {
   res.setHeader("Access-Control-Allow-Origin", "*");
   const { game_pk, venue, away_sp_id, home_sp_id, away_team_id, home_team_id, game_time } = req.query;
@@ -225,23 +329,37 @@ export default async function handler(req, res) {
       results.lineups.home = h.map((p,i)=>({...p,lineup_spot:i+1}));
     }
 
-    // Savant (inlined — no internal API call)
-    const savant = await getSavant();
+    // Savant + pitch arsenals (inlined — no internal API call)
+    const [savant, arsenals] = await Promise.all([getSavant(), getArsenals()]);
     if (Object.keys(savant).length) results.savantUsed = true;
+    if (arsenals.pitcher && Object.keys(arsenals.pitcher).length) results.arsenalUsed = true;
 
-    // Resolve each starter's throwing hand up front — batters need the opposing
-    // SP's handedness to fetch the correct vs-LHP / vs-RHP platoon split.
-    const spThrows = {}; // { away: "R"|"L", home: "R"|"L" }
+    // Resolve each starter's throwing hand AND name up front — batters need the
+    // opposing SP's handedness (platoon split) and name (pitch-arsenal lookup).
+    const spThrows = {}; // { away:"R"|"L", home:"R"|"L" }
+    const spName = {};   // { away:"Name", home:"Name" }
     await Promise.all([["away", away_sp_id], ["home", home_sp_id]].map(async ([key, pid]) => {
       if (!pid || pid === "null") return;
       try {
         const r = await fetchT(`${BASE}/people/${pid}`, 9000);
         const d = await r.json();
         spThrows[key] = d.people?.[0]?.pitchHand?.code || "R";
+        spName[key] = d.people?.[0]?.fullName || "";
       } catch { spThrows[key] = "R"; }
     }));
     // Away batters face the HOME starter and vice-versa.
     const oppHandForSide = { away: spThrows.home || "R", home: spThrows.away || "R" };
+    const oppSPNameForSide = { away: spName.home || "", home: spName.away || "" };
+    // The starter arsenal each side's hitters will face.
+    const oppArsenalForSide = {
+      away: arsenals.pitcher?.[(spName.home||"").toLowerCase()] || null,
+      home: arsenals.pitcher?.[(spName.away||"").toLowerCase()] || null
+    };
+    // Expose the starters' own arsenals for the prompt (what they throw).
+    results.pitcherArsenal = {
+      away: arsenals.pitcher?.[(spName.away||"").toLowerCase()] || null,
+      home: arsenals.pitcher?.[(spName.home||"").toLowerCase()] || null
+    };
 
     // Per-player stats
     const sideOf = {};
@@ -301,6 +419,16 @@ export default async function handler(req, res) {
       } catch {}
       const sv = savant[(p.name||"").toLowerCase()];
       if (sv) { out.barrel_pct=sv.barrel_pct; out.hard_hit_pct=sv.hard_hit_pct; out.avg_ev=sv.avg_ev; out.launch_angle=sv.launch_angle; }
+
+      // Pitch-type matchup vs the starter this batter faces: how this hitter
+      // performs against the pitch families the starter throws most, and how
+      // hittable those pitches have been.
+      const myBatArsenal = arsenals.batter?.[(p.name||"").toLowerCase()];
+      const oppArsenal = oppArsenalForSide[sideOf[p.id]];
+      const mm = pitchMatchup(myBatArsenal, oppArsenal);
+      if (mm) { out.pitch_matchup = mm.str; out.pitch_edge = mm.edge; }
+      out.opp_sp = oppSPNameForSide[sideOf[p.id]] || "";
+
       playerStats[p.id] = out;
     }));
     results.playerStats = playerStats;
@@ -344,7 +472,13 @@ export default async function handler(req, res) {
         const r = await fetchT(`${BASE}/people/${pid}/stats?stats=byDateRange&group=pitching&startDate=${start}&endDate=${end}&season=2026`, 9000);
         const d = await r.json();
         const s = d.stats?.[0]?.splits?.[0]?.stat;
-        if (s) { ps.recent_hr9=s.homeRunsPer9||"N/A"; ps.recent_era=s.era||"N/A"; }
+        if (s) {
+          ps.recent_hr9=s.homeRunsPer9||"N/A";
+          ps.recent_era=s.era||"N/A";
+          ps.recent_baa=s.avg||"N/A";            // batting avg against, last 21d
+          ps.recent_hr=s.homeRuns||0;            // HRs allowed, last 21d
+          ps.recent_ip=s.inningsPitched||"0";
+        }
       } catch {}
       results.pitcherStats[key] = ps;
     }
