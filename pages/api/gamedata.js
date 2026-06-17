@@ -86,6 +86,86 @@ function windEffect(venue, windFromDeg, windMph) {
   return `cross-wind (${windMph}mph)`;                            // neutral-ish
 }
 
+// Numeric version of the wind effect for the environment multiplier:
+// returns a factor (1.0 = neutral). OUT boosts, IN suppresses, scaled by speed.
+function windFactor(venue, windFromDeg, windMph) {
+  const key = venue && Object.keys(VENUE_ORIENT).find(k => venue.toLowerCase().includes(k.toLowerCase()));
+  if (!key) return 1.0;
+  const o = VENUE_ORIENT[key];
+  if (o.dome) return 1.0;
+  if (windMph < 5) return 1.0;
+  const towardDeg = (windFromDeg + 180) % 360;
+  let diff = Math.abs(towardDeg - o.cf);
+  if (diff > 180) diff = 360 - diff;
+  // ~3% per 5mph out to CF, symmetric suppression blowing in. Cap at +/-18%.
+  const mag = Math.min(0.18, (windMph / 5) * 0.03);
+  if (diff <= 45) return 1 + mag;        // blowing out
+  if (diff >= 135) return 1 - mag;       // blowing in
+  return 1.0;                            // cross-wind ~neutral
+}
+
+// Per-park HR factor BY BATTER HANDEDNESS (relative to MLB avg = 1.00).
+// Captures short porches / quirks that a single park number misses:
+//   L = factor for left-handed batters, R = for right-handed batters.
+// e.g. Yankee Stadium's short RF strongly helps LHB; Fenway's Monster helps RHB.
+const PARK_HAND_HR = {
+  "Yankee Stadium": { L:1.22, R:1.02 },
+  "Fenway Park": { L:0.94, R:1.12 },
+  "Coors Field": { L:1.18, R:1.18 },
+  "Great American Ball Park": { L:1.16, R:1.14 },
+  "Citizens Bank Park": { L:1.12, R:1.10 },
+  "Camden Yards": { L:1.02, R:0.90 },
+  "Oriole Park at Camden Yards": { L:1.02, R:0.90 },
+  "Globe Life Field": { L:1.05, R:1.04 },
+  "Wrigley Field": { L:1.04, R:1.05 },
+  "Rate Field": { L:1.10, R:1.12 },
+  "Guaranteed Rate Field": { L:1.10, R:1.12 },
+  "Truist Park": { L:1.05, R:1.06 },
+  "Dodger Stadium": { L:1.08, R:1.10 },
+  "Chase Field": { L:1.04, R:1.05 },
+  "American Family Field": { L:1.10, R:1.08 },
+  "Minute Maid Park": { L:1.02, R:1.10 },
+  "Daikin Park": { L:1.02, R:1.10 },
+  "Nationals Park": { L:1.06, R:1.02 },
+  "Citi Field": { L:0.96, R:0.98 },
+  "Oracle Park": { L:0.78, R:0.95 },   // deep RF triples alley kills LHB HR
+  "Petco Park": { L:0.94, R:0.96 },
+  "T-Mobile Park": { L:0.92, R:0.94 },
+  "Comerica Park": { L:0.96, R:0.92 },
+  "Kauffman Stadium": { L:0.94, R:0.93 },
+  "PNC Park": { L:0.90, R:1.00 },
+  "Tropicana Field": { L:0.97, R:0.97 },
+  "Progressive Field": { L:1.00, R:1.00 },
+  "Target Field": { L:1.00, R:1.02 },
+  "Busch Stadium": { L:0.96, R:0.95 },
+  "Angel Stadium": { L:1.02, R:1.04 },
+  "Rogers Centre": { L:1.05, R:1.06 },
+  "loanDepot park": { L:0.92, R:0.94 }
+};
+function parkHandFactor(venue, bats) {
+  const key = venue && Object.keys(PARK_HAND_HR).find(k => venue.toLowerCase().includes(k.toLowerCase()));
+  if (!key) return 1.0;
+  const f = PARK_HAND_HR[key];
+  // Switch hitters (S): average the two.
+  if (bats === "S") return (f.L + f.R) / 2;
+  return bats === "L" ? f.L : f.R;
+}
+
+// Unified game-level HR environment multiplier (the "HRForce" idea): combine
+// elevation, temperature, and wind into ONE number so the model gets a clean
+// signal instead of having to mentally combine raw fields. 1.00 = average.
+function hrEnvironment(elevation, tempF, windMult) {
+  let f = 1.0;
+  // Elevation: Coors (~5200ft) is famously ~+12-15%. Scale gently per 1000ft.
+  if (elevation > 1000) f *= 1 + Math.min(0.15, (elevation - 1000) / 1000 * 0.035);
+  // Temperature: warm air carries. ~+1.5% per 10°F above 70, -per 10 below.
+  if (typeof tempF === "number" && !isNaN(tempF)) f *= 1 + ((tempF - 70) / 10) * 0.015;
+  // Wind already a factor.
+  f *= (windMult || 1.0);
+  return Math.round(f * 1000) / 1000;
+}
+
+
 // ── Module-level Savant cache (persists across warm invocations) ────────
 let SAVANT_CACHE = { ts: 0, data: null };
 
@@ -429,6 +509,10 @@ export default async function handler(req, res) {
       if (mm) { out.pitch_matchup = mm.str; out.pitch_edge = mm.edge; }
       out.opp_sp = oppSPNameForSide[sideOf[p.id]] || "";
 
+      // Personalized park HR factor: how this park plays for THIS batter's
+      // handedness (short porches etc.), not a single park-wide number.
+      out.park_hand_factor = parkHandFactor(venue, p.bats || "R");
+
       playerStats[p.id] = out;
     }));
     results.playerStats = playerStats;
@@ -526,13 +610,18 @@ export default async function handler(req, res) {
       const idx = results.isNightGame ? 19 : 13;
       const wdir = d.hourly?.winddirection_10m?.[idx]||180;
       const wmph = Math.round(d.hourly?.windspeed_10m?.[idx]||5);
+      const tempF = Math.round(d.hourly?.temperature_2m?.[idx]||70);
       const wEffect = windEffect(venue, wdir, wmph);
+      const wMult = windFactor(venue, wdir, wmph);
+      const hrEnv = hrEnvironment(results.elevation, tempF, wMult);
+      results.hrEnv = hrEnv; // unified game HR multiplier (1.00 = avg)
       results.weather = {
-        temp: Math.round(d.hourly?.temperature_2m?.[idx]||70)+"°F",
+        temp: tempF+"°F",
         wind_speed: wmph+" mph",
         wind_dir: wdir,
         wind_effect: wEffect,
-        summary: `${Math.round(d.hourly?.temperature_2m?.[idx]||70)}°F, ${wEffect||`wind ${wmph}mph`}`
+        hr_env: hrEnv,
+        summary: `${tempF}°F, ${wEffect||`wind ${wmph}mph`}, HRenv ${hrEnv}`
       };
     } catch {}
 
