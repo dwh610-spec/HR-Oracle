@@ -179,7 +179,7 @@ async function callCerebras(prompt, key) {
       headers:{ "Content-Type":"application/json", "Authorization":`Bearer ${cleanKey}` },
       body: JSON.stringify({
         model: "gpt-oss-120b",
-        max_completion_tokens: 5000,
+        max_completion_tokens: 3500,
         temperature: 0.3,
         response_format: { type: "json_object" },
         messages: [{ role:"user", content: prompt }]
@@ -207,14 +207,16 @@ async function callCerebras(prompt, key) {
 
   // gpt-oss-120b is a reasoning model: the JSON answer is in message.content,
   // but if it runs low on tokens the parseable JSON can end up in `reasoning`.
-  // Check content first, then reasoning as a fallback.
   const msg = data?.choices?.[0]?.message || {};
   const text = msg.content || msg.reasoning || "";
   const finish = data?.choices?.[0]?.finish_reason || "";
   if (!text) return { ok:false, kind:"empty", msg:"Cerebras empty" };
-  const cands = extractCandidates(text);
+  let cands = extractCandidates(text);
+  // If output was cut off, recover the complete candidate objects we did get
+  // before declaring it too big (matches the Gemini/OpenRouter behavior).
+  if (!cands) cands = salvageCandidates(text);
   if (!cands) {
-    // Ran out of room before producing valid JSON → split the slate smaller.
+    // Truly nothing usable → signal "toobig" so the caller splits the slate smaller.
     if (finish === "length") return { ok:false, kind:"toobig", msg:"Cerebras truncated (length)" };
     return { ok:false, kind:"unparseable", msg:"Cerebras unparseable" };
   }
@@ -310,7 +312,7 @@ async function callOpenRouter(model, prompt, key, timeoutMs) {
 // reasoning + answer (we allow 5,000 for completion). So keep INPUT small —
 // ~2,600 tokens — which is roughly 2-3 games per chunk.
 function chunkForCerebras(blocks) {
-  const BUDGET = 2600;
+  const BUDGET = 2000;
   const overhead = estTokens(INSTRUCTIONS_HEAD) + estTokens(INSTRUCTIONS_TAIL) + 50;
   const chunks = [];
   let cur = [], curTok = overhead;
