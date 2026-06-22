@@ -29,7 +29,7 @@ function gameBlock(game, gameData) {
   const elevation = gameData?.elevation || 20;
   const slot = gameData?.isNightGame ? "N" : "D";
 
-  const fmt = (arr) => arr.map(p => {
+  const fmt = (arr, oppGrade) => arr.map(p => {
     const s = gameData?.playerStats?.[p.id] || {};
     const power = s.barrel_pct ? ` Brl%${s.barrel_pct}EV${s.avg_ev||"?"}` : "";
     const air = (s.fb_pct!=null) ? ` FB%${s.fb_pct}` : "";
@@ -41,7 +41,8 @@ function gameBlock(game, gameData) {
     // Personalized park factor for this batter's handedness (1.00 = neutral).
     const pf = (s.park_hand_factor!=null && Math.abs(s.park_hand_factor-1) >= 0.03)
       ? ` ParkHR${s.park_hand_factor.toFixed(2)}` : "";
-    return `${p.name}(${p.bats}) #${p.lineup_spot||"?"} HR${s.hr||0} OPS${s.ops||"?"} ISO${s.iso||"?"}${air} L14:HR${s.recent_hr??0}ISO${s.recent_iso||"?"}OPS${s.recent_ops||"?"}(${s.recent_ab||0}ab)${power}${plat}${pm}${pf}`;
+    // Lead with the OPPOSING PITCHER's HR-vulnerability — the dominant factor.
+    return `[vsP:${oppGrade}] ${p.name}(${p.bats}) #${p.lineup_spot||"?"} HR${s.hr||0} OPS${s.ops||"?"} ISO${s.iso||"?"}${air} L14:HR${s.recent_hr??0}ISO${s.recent_iso||"?"}OPS${s.recent_ops||"?"}(${s.recent_ab||0}ab)${power}${plat}${pm}${pf}`;
   }).join("\n");
 
   // Opposing full-staff HR vulnerability (incl. bullpen) — away hitters face it
@@ -72,7 +73,7 @@ function gameBlock(game, gameData) {
     return fams.length ? ` arsenal:${fams.join("/")}` : "";
   };
   const spLine = (label, sp, p, ars) => {
-    let s = `${label} ${sp.name}(${sp.throws})`;
+    let s = `${label} ${sp.name}(${sp.throws}) [HR-VULN: ${p.hr_vuln||"NEUTRAL"}]`;
     if (p.recent_era!=null && p.recent_era!=="N/A")
       s += ` L21: ERA${p.recent_era} HR/9 ${p.recent_hr9||"?"} BAA${p.recent_baa||"?"} (${p.recent_hr||0}HR/${p.recent_ip||"?"}ip)`;
     s += ` | season ERA${p.era||sp.era} HR/9 ${p.hr9||"?"}`;
@@ -87,18 +88,32 @@ ${spLine("ASP", game.away_sp, aP, arsA)}
 ${spLine("HSP", game.home_sp, hP, arsH)}
 Wx:${weather.summary||"?"}${weather.wind_effect?` [${weather.wind_effect}]`:""}
 AWAY(vs ${game.home_sp.throws}HP${staffStr(oppA)}):
-${fmt(awayList)}
+${fmt(awayList, hP.hr_vuln||"NEUTRAL")}
 HOME(vs ${game.away_sp.throws}HP${staffStr(oppH)}):
-${fmt(homeList)}`;
+${fmt(homeList, aP.hr_vuln||"NEUTRAL")}`;
 }
 
 const INSTRUCTIONS_HEAD = `You are an elite MLB home-run prediction model. Below are MLB games with lineups and stats. Identify the TOP HOME RUN CANDIDATES.
 
 Return ONLY the 12 STRONGEST home-run candidates across the ENTIRE slate (not per game) — the single best plays, ranked. Skip marginal names. Games tagged [PROJ] have projected (not confirmed) lineups — still consider them.
 
-SCORING PRIORITY: (1) RECENT PITCHING COLLAPSE is now co-equal with batter form — a starter with a high RECENT (L21) ERA/HR-9/BAA, OR an opposing staff with a high L14 HR/9 & ERA, means HRs cluster across the WHOLE lineup. When you see a starter being shelled lately or a gassed/homer-prone staff, boost EVERY decent bat in that lineup (including non-stars/bottom-of-order), because that's exactly where surprise HRs come from. Weight RECENT pitching form far above season pitching numbers — season lags for call-ups and recent strugglers. (2) PITCH-TYPE MATCHUP (PITCHMIX) — critical for non-obvious plays: each batter line shows the pitch families the starter throws (FB/BRK/OFF) with that batter's SLG vs the family (B.slg) and the pitcher's run-value-allowed/100 on it (P.rv, higher=more hittable). A hitter who SLUGS HIGH (.550+) vs a family the starter throws a lot AND gets hit on is a PRIME pick even with a modest season HR total. Do NOT rank by season HRs alone — a mid-power hitter with a great pitch-type matchup should outrank a star facing pitches he can't elevate. (3) RECENT 14-day batter form — a hot bat beats a cold star; weight recent ~60% vs season ~40%. (4) PLATOON split — the hitter's vsLHP/vsRHP line vs the hand he faces. (5) power metrics (barrel%, EV). (6) batted-ball shape — high batter FB% + high pitcher/staff FB% is a prime HR setup; a ground-ball hitter rarely homers. (7) HR-ENV — each game header shows ONE HR-ENV multiplier (1.00=avg) already combining park, elevation, temperature, and wind; >1.08 boosts ALL hitters in that game, <0.93 suppresses them. (8) ParkHR — a batter may show a personalized park factor for HIS handedness (e.g. a lefty in a short-RF park); >1.10 is a meaningful boost, <0.92 a meaningful drag, and this is more specific than the game-wide number. (9) lineup spot 1-5 > 6-9. (10) HR-ENV already includes temp & wind — do NOT double-count them. Actively diversify — reward strong pitch-type and platoon matchups so the board is NOT just the same season-HR leaders every day. Reward (hot bat + collapsing/homer-prone pitching + great pitch matchup + wind-out) 85+. Push cold/ground-ball bats facing strong RECENT pitching into the 30s. Use decimal hr_score to break ties.
+SCORING PRIORITY — THE OPPOSING PITCHER IS THE #1 FACTOR, ABOVE BATTER POWER:
 
-IMPORTANT EXPECTATION: HRs are rare, high-variance events — even the single best play on a slate is only ~8-13% to homer. Do NOT inflate scores to look confident; a realistic top play is ~70-85, not 99. Spread scores honestly so the ranking reflects true separation.`;
+(1) OPPOSING PITCHER HR-VULNERABILITY is the single most important input. Every batter line begins with [vsP:GRADE] — the HR-vulnerability of the pitcher THAT hitter faces — and each starter shows [HR-VULN: GRADE]. The grades mean:
+   • MEATBALL / VULNERABLE → pitcher gives up HRs easily. These lineups are where HRs happen. Rank their hitters HIGH.
+   • NEUTRAL → average.
+   • TOUGH / ELITE → very hard to homer off (e.g. Skenes, Yoshinobu, Cristopher Sánchez on form). DRAMATICALLY DOWNGRADE every hitter facing them, even elite sluggers.
+   HARD RULE: an AVERAGE power hitter facing a MEATBALL/VULNERABLE pitcher MUST outrank a GREAT power hitter facing an ELITE/TOUGH pitcher. Do not put star sluggers in the top 12 just because of their season HR total if they face an ELITE/TOUGH arm — bump them down hard. The best plays each day should cluster in the games with the most hittable pitching.
+
+(2) RECENT PITCHING COLLAPSE & weak bullpen — a starter with high RECENT (L21) ERA/HR-9/BAA, or an opposing staff with high L14 HR/9, means HRs cluster across the WHOLE lineup; boost even non-stars there. Weight RECENT pitching far above season numbers.
+
+(3) PITCH-TYPE MATCHUP (PITCHMIX) — a hitter who SLUGS HIGH (.550+) vs a pitch family the starter throws a lot AND gets hit on (P.rv positive) is a prime pick even with modest season HRs.
+
+(4) PLATOON split (vsLHP/vsRHP). (5) RECENT 14-day batter form (recent ~60% vs season ~40%) — only AFTER the pitcher matchup is accounted for. (6) power metrics (barrel%, EV) — these are a TIEBREAKER among hitters facing similar-quality pitching, NOT a reason to rank a star vs an ace over an average bat vs a meatball. (7) batted-ball shape — high batter FB% + high pitcher FB% is a prime setup; ground-ball hitters rarely homer. (8) HR-ENV multiplier (1.00=avg): >1.08 boosts all hitters in that game, <0.93 suppresses. (9) ParkHR personalized factor: >1.10 boost, <0.92 drag. (10) lineup spot 1-5 > 6-9.
+
+Reward (hittable pitcher MEATBALL/VULNERABLE + hot bat + good pitch matchup + favorable park/env) 85+. Push even strong sluggers facing ELITE/TOUGH pitching into the 30s-40s. Actively diversify away from the same season-HR leaders — the daily board should be driven by WHICH PITCHERS ARE HITTABLE, not which hitters are famous.
+
+IMPORTANT EXPECTATION: HRs are rare, high-variance events — even the single best play on a slate is only ~8-13% to homer. Do NOT inflate scores; a realistic top play is ~70-85, not 99. Spread scores honestly so the ranking reflects true separation.`;
 
 const INSTRUCTIONS_TAIL = `Respond with ONLY JSON (no markdown):
 {"candidates":[{"name":"","team":"","bats":"L","lineup_spot":3,"opposing_sp":"","sp_throws":"R","pitcher_grade":"AVERAGE","batter_grade":"HOT","hr_score":72.4,"hr_prob":"14%","key_stats":[{"label":"L14 HR","value":"4"},{"label":"L14 ISO","value":".310"},{"label":"vsRHP OPS","value":".940"},{"label":"Brl%","value":"15"}],"summary":"brief — mention platoon edge, wind, or FB-shape when relevant"}]}
