@@ -174,6 +174,64 @@ async function getSavant() {
     return SAVANT_CACHE.data;
   }
   const year = new Date().getFullYear();
+  const players = await fetchStatcastBoard("");   // overall (no hand filter)
+  SAVANT_CACHE = { ts: Date.now(), data: players };
+  return players;
+}
+
+// Parse one Statcast exit-velocity/barrels leaderboard CSV. `hand` is "", "R",
+// or "L" (filters to batted balls vs RHP / LHP via the pitcher_hand param).
+async function fetchStatcastBoard(hand) {
+  const year = new Date().getFullYear();
+  const players = {};
+  try {
+    const handParam = hand ? `&pitcher_hand=${hand}` : "";
+    const url = `https://baseballsavant.mlb.com/leaderboard/statcast?type=batter&year=${year}&position=&team=&min=q${handParam}&csv=true`;
+    const r = await fetchT(url, 12000, { headers: { "User-Agent": "Mozilla/5.0" } });
+    const text = await r.text();
+    const lines = text.split("\n").filter(l => l.trim());
+    if (lines.length > 1) {
+      const headers = lines[0].split(",").map(h => h.replace(/"/g, "").trim().toLowerCase());
+      const iName = headers.findIndex(h => h.includes("name")) >= 0 ? headers.findIndex(h => h.includes("name")) : 0;
+      const iBarrel = headers.findIndex(h => (h.includes("barrel") && (h.includes("pa")||h.includes("rate"))) || h==="brl_percent");
+      const iHard = headers.findIndex(h => h.includes("hard"));
+      const iEV = headers.findIndex(h => h.includes("exit_velocity")||h.includes("hit_speed")||h.includes("launch_speed"));
+      const iLA = headers.findIndex(h => h.includes("launch_angle")||h.includes("avg_angle"));
+      const iHR = headers.findIndex(h => h==="hr"||h.includes("home_run")||h.includes("homerun"));
+      for (let i = 1; i < lines.length; i++) {
+        const cols = lines[i].match(/("([^"]*)"|[^,]+)/g) || [];
+        const clean = cols.map(c => c.replace(/"/g, "").trim());
+        let name = clean[iName] || "";
+        if (name.includes(",")) { const [last, first] = name.split(",").map(s=>s.trim()); name = `${first} ${last}`; }
+        if (!name) continue;
+        players[name.toLowerCase()] = {
+          barrel_pct: iBarrel>=0 ? clean[iBarrel] : null,
+          hard_hit_pct: iHard>=0 ? clean[iHard] : null,
+          avg_ev: iEV>=0 ? clean[iEV] : null,
+          launch_angle: iLA>=0 ? clean[iLA] : null,
+          hr: iHR>=0 ? clean[iHR] : null
+        };
+      }
+    }
+  } catch {
+    // fail-safe: empty map
+  }
+  return players;
+}
+
+// Cache for the two handedness-split power boards (vs RHP / vs LHP).
+let SPLIT_CACHE = { ts: 0, R: null, L: null };
+async function getSavantSplits() {
+  if (SPLIT_CACHE.R && Date.now() - SPLIT_CACHE.ts < 10 * 60 * 1000) {
+    return { R: SPLIT_CACHE.R, L: SPLIT_CACHE.L };
+  }
+  const [vsR, vsL] = await Promise.all([fetchStatcastBoard("R"), fetchStatcastBoard("L")]);
+  SPLIT_CACHE = { ts: Date.now(), R: vsR, L: vsL };
+  return { R: vsR, L: vsL };
+}
+
+async function _legacyGetSavantUnused() {
+  const year = new Date().getFullYear();
   const players = {};
   try {
     const url = `https://baseballsavant.mlb.com/leaderboard/statcast?type=batter&year=${year}&position=&team=&min=q&csv=true`;
@@ -410,7 +468,7 @@ export default async function handler(req, res) {
     }
 
     // Savant + pitch arsenals (inlined — no internal API call)
-    const [savant, arsenals] = await Promise.all([getSavant(), getArsenals()]);
+    const [savant, arsenals, savantSplits] = await Promise.all([getSavant(), getArsenals(), getSavantSplits()]);
     if (Object.keys(savant).length) results.savantUsed = true;
     if (arsenals.pitcher && Object.keys(arsenals.pitcher).length) results.arsenalUsed = true;
 
@@ -499,6 +557,20 @@ export default async function handler(req, res) {
       } catch {}
       const sv = savant[(p.name||"").toLowerCase()];
       if (sv) { out.barrel_pct=sv.barrel_pct; out.hard_hit_pct=sv.hard_hit_pct; out.avg_ev=sv.avg_ev; out.launch_angle=sv.launch_angle; }
+
+      // Handedness-split power: this hitter's barrel/EV/LA/HR vs the HAND of the
+      // starter he faces (RHP or LHP) — sharper than overall season power.
+      const faceHand = oppHandForSide[sideOf[p.id]] || "R";
+      const splitBoard = faceHand === "L" ? savantSplits.L : savantSplits.R;
+      const svs = splitBoard?.[(p.name||"").toLowerCase()];
+      if (svs) {
+        out.split_hand = faceHand;
+        out.split_barrel = svs.barrel_pct;
+        out.split_ev = svs.avg_ev;
+        out.split_la = svs.launch_angle;
+        out.split_hardhit = svs.hard_hit_pct;
+        out.split_pow_hr = svs.hr;
+      }
 
       // Pitch-type matchup vs the starter this batter faces: how this hitter
       // performs against the pitch families the starter throws most, and how
