@@ -31,7 +31,15 @@ function gameBlock(game, gameData) {
 
   const fmt = (arr, oppGrade) => arr.map(p => {
     const s = gameData?.playerStats?.[p.id] || {};
-    const power = s.barrel_pct ? ` Brl%${s.barrel_pct}EV${s.avg_ev||"?"}` : "";
+    // Overall power: barrel%, exit velo, launch angle, hard-hit%.
+    let power = "";
+    if (s.barrel_pct) {
+      power = ` Brl%${s.barrel_pct}EV${s.avg_ev||"?"}LA${s.launch_angle||"?"}HH%${s.hard_hit_pct||"?"}`;
+    }
+    // Handedness-split power: same metrics but only vs the hand he faces today.
+    const sp = (s.split_barrel!=null)
+      ? ` vs${s.split_hand}HP-pow:Brl%${s.split_barrel}EV${s.split_ev||"?"}LA${s.split_la||"?"}HR${s.split_pow_hr||"?"}`
+      : "";
     const air = (s.fb_pct!=null) ? ` FB%${s.fb_pct}` : "";
     // Platoon line: this hitter's numbers vs the hand of the SP he actually faces.
     const plat = s.plat_ops ? ` vs${s.plat_hand}HP:OPS${s.plat_ops}HR${s.plat_hr}ISO${s.plat_iso}(${s.plat_ab}ab)` : "";
@@ -42,7 +50,7 @@ function gameBlock(game, gameData) {
     const pf = (s.park_hand_factor!=null && Math.abs(s.park_hand_factor-1) >= 0.03)
       ? ` ParkHR${s.park_hand_factor.toFixed(2)}` : "";
     // Lead with the OPPOSING PITCHER's HR-vulnerability — the dominant factor.
-    return `[vsP:${oppGrade}] ${p.name}(${p.bats}) #${p.lineup_spot||"?"} HR${s.hr||0} OPS${s.ops||"?"} ISO${s.iso||"?"}${air} L14:HR${s.recent_hr??0}ISO${s.recent_iso||"?"}OPS${s.recent_ops||"?"}(${s.recent_ab||0}ab)${power}${plat}${pm}${pf}`;
+    return `[vsP:${oppGrade}] ${p.name}(${p.bats}) #${p.lineup_spot||"?"} HR${s.hr||0} OPS${s.ops||"?"} ISO${s.iso||"?"}${air} L14:HR${s.recent_hr??0}ISO${s.recent_iso||"?"}OPS${s.recent_ops||"?"}(${s.recent_ab||0}ab)${power}${sp}${plat}${pm}${pf}`;
   }).join("\n");
 
   // Opposing full-staff HR vulnerability (incl. bullpen) — away hitters face it
@@ -109,7 +117,7 @@ SCORING PRIORITY — THE OPPOSING PITCHER IS THE #1 FACTOR, ABOVE BATTER POWER:
 
 (3) PITCH-TYPE MATCHUP (PITCHMIX) — a hitter who SLUGS HIGH (.550+) vs a pitch family the starter throws a lot AND gets hit on (P.rv positive) is a prime pick even with modest season HRs.
 
-(4) PLATOON split (vsLHP/vsRHP). (5) RECENT 14-day batter form (recent ~60% vs season ~40%) — only AFTER the pitcher matchup is accounted for. (6) power metrics (barrel%, EV) — these are a TIEBREAKER among hitters facing similar-quality pitching, NOT a reason to rank a star vs an ace over an average bat vs a meatball. (7) batted-ball shape — high batter FB% + high pitcher FB% is a prime setup; ground-ball hitters rarely homer. (8) HR-ENV multiplier (1.00=avg): >1.08 boosts all hitters in that game, <0.93 suppresses. (9) ParkHR personalized factor: >1.10 boost, <0.92 drag. (10) lineup spot 1-5 > 6-9.
+(4) PLATOON split (vsLHP/vsRHP). (5) RECENT 14-day batter form (recent ~60% vs season ~40%) — only AFTER the pitcher matchup is accounted for. (6) power metrics — barrel%, exit velo (EV), launch angle (LA, ideal HR range ~25-35°), hard-hit%. Prefer the handedness-split version (vsRHP-pow / vsLHP-pow) since it reflects power vs the exact hand the hitter faces today. These are a TIEBREAKER among hitters facing similar-quality pitching, NOT a reason to rank a star vs an ace over an average bat vs a meatball. A hitter with high barrel% AND launch angle in the 25-35° band is a strong HR-shape profile. (7) batted-ball shape — high batter FB% + high pitcher FB% is a prime setup; ground-ball hitters rarely homer. (8) HR-ENV multiplier (1.00=avg): >1.08 boosts all hitters in that game, <0.93 suppresses. (9) ParkHR personalized factor: >1.10 boost, <0.92 drag. (10) lineup spot 1-5 > 6-9.
 
 Reward (hittable pitcher MEATBALL/VULNERABLE + hot bat + good pitch matchup + favorable park/env) 85+. Push even strong sluggers facing ELITE/TOUGH pitching into the 30s-40s. Actively diversify away from the same season-HR leaders — the daily board should be driven by WHICH PITCHERS ARE HITTABLE, not which hitters are famous.
 
