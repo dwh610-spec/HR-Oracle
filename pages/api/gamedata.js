@@ -564,6 +564,32 @@ export default async function handler(req, res) {
           ps.recent_ip=s.inningsPitched||"0";
         }
       } catch {}
+
+      // Explicit HR-VULNERABILITY GRADE for this starter, so the model can't
+      // under-weight it. Blends season HR/9, recent (L21) HR/9 — weighted toward
+      // recent — and fly-ball rate. Lower HR/9 = tougher to homer off of.
+      // Grades: ELITE (very hard) / TOUGH / NEUTRAL / VULNERABLE / MEATBALL.
+      const seasonHr9 = parseFloat(ps.hr9);
+      const recentHr9 = parseFloat(ps.recent_hr9);
+      let blend = null;
+      if (!isNaN(seasonHr9) && !isNaN(recentHr9)) blend = recentHr9*0.6 + seasonHr9*0.4;
+      else if (!isNaN(recentHr9)) blend = recentHr9;
+      else if (!isNaN(seasonHr9)) blend = seasonHr9;
+      if (blend != null) {
+        // Nudge by fly-ball rate: extreme FB pitchers give up more HRs.
+        const fb = ps.fb_pct;
+        let adj = blend;
+        if (typeof fb === "number") { if (fb >= 42) adj += 0.15; else if (fb <= 32) adj -= 0.1; }
+        ps.hr_vuln_blend = Math.round(blend*100)/100;
+        ps.hr_vuln = adj <= 0.70 ? "ELITE"
+                  : adj <= 1.00 ? "TOUGH"
+                  : adj <= 1.30 ? "NEUTRAL"
+                  : adj <= 1.65 ? "VULNERABLE"
+                  : "MEATBALL";
+      } else {
+        ps.hr_vuln = "NEUTRAL";
+      }
+
       results.pitcherStats[key] = ps;
     }
 
