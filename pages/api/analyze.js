@@ -338,7 +338,7 @@ async function callOpenRouter(model, prompt, key, timeoutMs) {
 // reasoning + answer (we allow 5,000 for completion). So keep INPUT small —
 // ~2,600 tokens — which is roughly 2-3 games per chunk.
 function chunkForCerebras(blocks) {
-  const BUDGET = 1400;
+  const BUDGET = 1900;
   const overhead = estTokens(INSTRUCTIONS_HEAD) + estTokens(INSTRUCTIONS_TAIL) + 50;
   const chunks = [];
   let cur = [], curTok = overhead;
@@ -440,7 +440,9 @@ export default async function handler(req, res) {
     const out = kept
       .filter(c => { const k=normName(c.name)+"|"+(c.team||""); if(seen.has(k))return false; seen.add(k); return true; })
       .map(c => ({ ...c, hr_score: Math.round((parseFloat(c.hr_score)||0)*10)/10, projected: projFor(c) }))
-      .sort((a,b) => b.hr_score - a.hr_score);
+      .sort((a,b) => b.hr_score - a.hr_score)
+      .slice(0, 15);   // hard slate-wide cap — keeps per-chunk Cerebras runs from
+                       // flooding the board with 10+ players per team.
 
     // Diagnostic: if we end up empty, say WHY so the UI shows something useful
     // instead of a bare "no candidates". rawN = objects AI returned; namedN =
@@ -465,41 +467,36 @@ export default async function handler(req, res) {
   const timeLeft = () => 58000 - elapsed();
 
   // ── Provider 1: OpenRouter (fresh quota tonight, large context = one call) ──
-  // Fail FAST: try just ONE fast free model with a short timeout. Slow free
-  // models cause server timeouts, so we don't grind through four of them — if
-  // the first doesn't answer quickly we move on to Gemini (known to be fast).
-  if (OPENROUTER_KEY && timeLeft() > 30000) {
-    const prompt = buildPrompt(blocks);
-    // Single attempt, single model. callOpenRouter has its own 50s cap, but we
-    // pass a tighter budget so it can't eat the whole window.
-    const r = await callOpenRouter("meta-llama/llama-3.3-70b-instruct:free", prompt, OPENROUTER_KEY, Math.min(28000, timeLeft() - 20000));
-    if (r.ok) return finalize(r.candidates, "openrouter:llama-3.3-70b");
-    lastMsg = r.msg;
-  }
-
-  // ── Provider 3: Gemini flash-lite (confirmed working, one clean batch call) ──
-  // flash-lite has the most generous free tier (15 RPM, 1000/day) and 1M context,
-  // so the whole slate goes in one request — no splitting.
+  // ── Provider 1: Gemini flash-lite FIRST — most reliable, 1M context so the
+  // whole slate goes in ONE call, and fast. This is the best shot at covering
+  // every game, so we try it before the slower free providers.
   if (GEMINI_KEY && timeLeft() > 15000) {
     const prompt = buildPrompt(blocks);
     for (const model of ["gemini-2.5-flash-lite", "gemini-2.5-flash"]) {
       if (timeLeft() < 12000) break;
-      // Give the call almost all remaining time, minus a small safety margin,
-      // so it returns (or aborts cleanly) before Vercel kills the function.
       const r = await callGemini(model, prompt, GEMINI_KEY, Math.max(10000, timeLeft() - 6000));
       if (r.ok) return finalize(r.candidates, model);
       lastMsg = r.msg;
-      // No long in-model retries here — falling to the next model/provider is
-      // faster and safer than sleeping inside our shrinking time budget.
     }
   }
 
-  // ── Provider 4: Cerebras (fallback). Split into chunks that fit its context. ──
+  // ── Provider 2: OpenRouter (one fast free model, full slate in one call). ──
+  if (OPENROUTER_KEY && timeLeft() > 22000) {
+    const prompt = buildPrompt(blocks);
+    const r = await callOpenRouter("meta-llama/llama-3.3-70b-instruct:free", prompt, OPENROUTER_KEY, Math.min(20000, timeLeft() - 16000));
+    if (r.ok) return finalize(r.candidates, "openrouter:llama-3.3-70b");
+    lastMsg = r.msg;
+  }
+
+  // ── Provider 3: Cerebras (last resort). Tiny 8k context forces chunking, so
+  // it can only cover part of a big slate — used only if the others all failed.
   // Only attempt if we have real time left — its chunked calls are the slowest.
   if (CEREBRAS_KEY && timeLeft() > 18000) {
     const allChunks = chunkForCerebras(blocks);
-    // Cap chunks by BOTH a hard limit and remaining time so we never overrun.
-    const MAX_CHUNKS = 5;
+    // Cap chunks by BOTH a hard limit and remaining time so we never overrun
+    // Vercel's function limit. The per-chunk time check below is the real guard;
+    // this cap is just a backstop.
+    const MAX_CHUNKS = 9;
     const chunks = allChunks.slice(0, MAX_CHUNKS);
     const collected = [];
     let cerebrasOk = true;
