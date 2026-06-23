@@ -388,7 +388,18 @@ function pitchMatchup(batterArsenal, pitcherArsenal) {
 
 export default async function handler(req, res) {
   res.setHeader("Access-Control-Allow-Origin", "*");
-  const { game_pk, venue, away_sp_id, home_sp_id, away_team_id, home_team_id, game_time } = req.query;
+  // Params can come from the query (legacy GET) or the POST body (current). The
+  // POST body also carries the pre-fetched Savant bundle so this function no
+  // longer hits Savant itself — that's done once per slate by /api/savant.
+  let body = req.body;
+  if (typeof body === "string") { try { body = JSON.parse(body); } catch { body = {}; } }
+  body = body || {};
+  const src = (k) => body[k] ?? req.query[k];
+  const game_pk = src("game_pk"), venue = src("venue"),
+        away_sp_id = src("away_sp_id"), home_sp_id = src("home_sp_id"),
+        away_team_id = src("away_team_id"), home_team_id = src("home_team_id"),
+        game_time = src("game_time");
+  const savantBundle = body.savant_bundle || null;
 
   try {
     const results = {
@@ -481,18 +492,26 @@ export default async function handler(req, res) {
       results.lineups.home = h.map((p,i)=>({...p,lineup_spot:i+1}));
     }
 
-    // Savant + pitch arsenals. These are SUPPLEMENTAL — wrap each so a slow or
-    // failed Savant CSV can never sink the core MLB data (lineups/stats) for the
-    // game. Settle individually; any that miss just degrade gracefully to {}.
-    const safe = (p) => p.then(v => v).catch(() => null);
-    const [savant, arsenals, savantSplits, pitcherContact] = await Promise.all([
-      safe(getSavant()), safe(getArsenals()), safe(getSavantSplits()), safe(getPitcherContact())
-    ]).then(([sv, ar, sp, pc]) => [
-      sv || {},
-      ar || { pitcher:{}, batter:{} },
-      sp || { R:{}, L:{} },
-      pc || {}
-    ]);
+    // Savant feeds: use the bundle passed in from /api/savant (fetched ONCE per
+    // slate). Fall back to per-game fetch only if no bundle was provided (legacy
+    // GET path), so this endpoint still works standalone.
+    let savant, arsenals, savantSplits, pitcherContact;
+    if (savantBundle) {
+      savant = savantBundle.savant || {};
+      arsenals = savantBundle.arsenals || { pitcher:{}, batter:{} };
+      savantSplits = savantBundle.splits || { R:{}, L:{} };
+      pitcherContact = savantBundle.pitcherContact || {};
+    } else {
+      const safe = (p) => p.then(v => v).catch(() => null);
+      [savant, arsenals, savantSplits, pitcherContact] = await Promise.all([
+        safe(getSavant()), safe(getArsenals()), safe(getSavantSplits()), safe(getPitcherContact())
+      ]).then(([sv, ar, sp, pc]) => [
+        sv || {},
+        ar || { pitcher:{}, batter:{} },
+        sp || { R:{}, L:{} },
+        pc || {}
+      ]);
+    }
     if (savant && Object.keys(savant).length) results.savantUsed = true;
     if (arsenals.pitcher && Object.keys(arsenals.pitcher).length) results.arsenalUsed = true;
 
