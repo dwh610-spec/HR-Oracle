@@ -181,12 +181,14 @@ async function getSavant() {
 
 // Parse one Statcast exit-velocity/barrels leaderboard CSV. `hand` is "", "R",
 // or "L" (filters to batted balls vs RHP / LHP via the pitcher_hand param).
-async function fetchStatcastBoard(hand) {
+// `type` is "batter" (default) or "pitcher" — for pitchers the metrics are the
+// contact they ALLOW (barrel%-against, hard-hit%-against, EV-against).
+async function fetchStatcastBoard(hand, type = "batter") {
   const year = new Date().getFullYear();
   const players = {};
   try {
     const handParam = hand ? `&pitcher_hand=${hand}` : "";
-    const url = `https://baseballsavant.mlb.com/leaderboard/statcast?type=batter&year=${year}&position=&team=&min=q${handParam}&csv=true`;
+    const url = `https://baseballsavant.mlb.com/leaderboard/statcast?type=${type}&year=${year}&position=&team=&min=q${handParam}&csv=true`;
     const r = await fetchT(url, 12000, { headers: { "User-Agent": "Mozilla/5.0" } });
     const text = await r.text();
     const lines = text.split("\n").filter(l => l.trim());
@@ -217,6 +219,18 @@ async function fetchStatcastBoard(hand) {
     // fail-safe: empty map
   }
   return players;
+}
+
+// Cache for pitcher contact-ALLOWED (barrel%/hard-hit%/EV against). This is the
+// forward-looking HR signal — loud contact precedes HR/9 rising.
+let PITCH_CONTACT_CACHE = { ts: 0, data: null };
+async function getPitcherContact() {
+  if (PITCH_CONTACT_CACHE.data && Date.now() - PITCH_CONTACT_CACHE.ts < 10 * 60 * 1000) {
+    return PITCH_CONTACT_CACHE.data;
+  }
+  const data = await fetchStatcastBoard("", "pitcher");
+  PITCH_CONTACT_CACHE = { ts: Date.now(), data };
+  return data;
 }
 
 // Cache for the two handedness-split power boards (vs RHP / vs LHP).
@@ -468,7 +482,7 @@ export default async function handler(req, res) {
     }
 
     // Savant + pitch arsenals (inlined — no internal API call)
-    const [savant, arsenals, savantSplits] = await Promise.all([getSavant(), getArsenals(), getSavantSplits()]);
+    const [savant, arsenals, savantSplits, pitcherContact] = await Promise.all([getSavant(), getArsenals(), getSavantSplits(), getPitcherContact()]);
     if (Object.keys(savant).length) results.savantUsed = true;
     if (arsenals.pitcher && Object.keys(arsenals.pitcher).length) results.arsenalUsed = true;
 
@@ -637,9 +651,20 @@ export default async function handler(req, res) {
         }
       } catch {}
 
+      // Contact ALLOWED (Savant): barrel% and hard-hit% surrendered. This is the
+      // FORWARD-LOOKING HR signal — loud contact precedes HR/9 rising, so it
+      // catches pitchers about to get homered on before the results show it.
+      const pName = (spName[key]||"").toLowerCase();
+      const pc = pitcherContact?.[pName];
+      if (pc) {
+        ps.barrel_allowed = pc.barrel_pct;     // % of batted balls barreled against him
+        ps.hardhit_allowed = pc.hard_hit_pct;  // % hard-hit (95+ mph) against him
+        ps.ev_allowed = pc.avg_ev;             // avg exit velo against
+      }
+
       // Explicit HR-VULNERABILITY GRADE for this starter, so the model can't
-      // under-weight it. Blends season HR/9, recent (L21) HR/9 — weighted toward
-      // recent — and fly-ball rate. Lower HR/9 = tougher to homer off of.
+      // under-weight it. Blends recent (L21) & season HR/9 with the QUALITY OF
+      // CONTACT ALLOWED (barrel%/hard-hit% against) and fly-ball rate.
       // Grades: ELITE (very hard) / TOUGH / NEUTRAL / VULNERABLE / MEATBALL.
       const seasonHr9 = parseFloat(ps.hr9);
       const recentHr9 = parseFloat(ps.recent_hr9);
@@ -648,16 +673,26 @@ export default async function handler(req, res) {
       else if (!isNaN(recentHr9)) blend = recentHr9;
       else if (!isNaN(seasonHr9)) blend = seasonHr9;
       if (blend != null) {
-        // Nudge by fly-ball rate: extreme FB pitchers give up more HRs.
-        const fb = ps.fb_pct;
         let adj = blend;
+        // Fly-ball rate nudge.
+        const fb = ps.fb_pct;
         if (typeof fb === "number") { if (fb >= 42) adj += 0.15; else if (fb <= 32) adj -= 0.1; }
-        ps.hr_vuln_blend = Math.round(blend*100)/100;
+        // Contact-quality nudge — the forward-looking part. League-average barrel%
+        // allowed ≈ 8%, hard-hit% ≈ 39%. Reward/penalize relative to those.
+        const brl = parseFloat(ps.barrel_allowed);
+        const hh = parseFloat(ps.hardhit_allowed);
+        if (!isNaN(brl)) adj += (brl - 8) * 0.045;   // +0.045 HR/9-equiv per pt of barrel% over avg
+        if (!isNaN(hh))  adj += (hh - 39) * 0.012;   // smaller weight for hard-hit%
+        ps.hr_vuln_blend = Math.round(adj*100)/100;
         ps.hr_vuln = adj <= 0.70 ? "ELITE"
                   : adj <= 1.00 ? "TOUGH"
                   : adj <= 1.30 ? "NEUTRAL"
                   : adj <= 1.65 ? "VULNERABLE"
                   : "MEATBALL";
+      } else if (!isNaN(parseFloat(ps.barrel_allowed))) {
+        // No HR/9 yet (e.g. early call-up) but we have contact data — grade on it.
+        const brl = parseFloat(ps.barrel_allowed);
+        ps.hr_vuln = brl >= 12 ? "VULNERABLE" : brl >= 9 ? "NEUTRAL" : "TOUGH";
       } else {
         ps.hr_vuln = "NEUTRAL";
       }
