@@ -200,6 +200,7 @@ function HROracleInner() {
   const [pendingGames, setPendingGames] = useState([]);
   const [selected, setSelected] = useState(null);
   const [refreshed, setRefreshed] = useState(null);
+  const [source, setSource] = useState(null);
 
   async function run() {
     setLoading(true); setErrors([]); setGames([]); setBatters([]); setDoneGames([]); setPendingGames([]);
@@ -290,6 +291,7 @@ function HROracleInner() {
         if (anData.error) throw new Error(anData.error);
         if (Array.isArray(anData.candidates) && anData.candidates.length) {
           allResults.push(...anData.candidates);
+          if (anData.source) setSource(anData.source);
         } else {
           throw new Error(anData.reason || "AI returned no candidates");
         }
@@ -408,8 +410,9 @@ function HROracleInner() {
                     {t}
                   </button>
                 ))}
-                <div style={{ marginLeft:"auto", fontSize:10, color:"#334155", fontFamily:"monospace" }}>
-                  {batters.length} batters · {games.length} games
+                <div style={{ marginLeft:"auto", fontSize:10, color:"#334155", fontFamily:"monospace", textAlign:"right" }}>
+                  <div>{batters.length} batters · {games.length} games</div>
+                  {source ? <div style={{ color:"#f97316", marginTop:2 }}>via {source}</div> : null}
                 </div>
               </div>
 
@@ -418,7 +421,7 @@ function HROracleInner() {
                   <div style={{ fontSize:9, color:"#334155", fontFamily:"monospace", letterSpacing:"0.08em", marginBottom:10 }}>TAP ANY ROW FOR DETAIL · <span style={{color:"#f59e0b"}}>~PROJ = projected lineup, not confirmed</span></div>
                   {top10.map((b,i)=><Row key={b.name+i} rank={i+1} b={b} selected={selected?.name===b.name} onClick={()=>setSelected(b)}/>)}
                   <div style={{ marginTop:14, padding:"10px 13px", background:"rgba(255,255,255,0.02)", border:"1px solid rgba(255,255,255,0.05)", borderRadius:8, fontSize:9, color:"#334155", fontFamily:"monospace", lineHeight:1.7 }}>
-                    ⚠️ Research & entertainment only. Uses live MLB Stats API + Open-Meteo weather + Gemini AI analysis.
+                    ⚠️ Research & entertainment only. Uses live MLB Stats API + Baseball Savant + Open-Meteo weather + AI analysis (provider shown above).
                   </div>
                 </>
               )}
