@@ -205,7 +205,7 @@ async function callCerebras(prompt, key) {
       headers:{ "Content-Type":"application/json", "Authorization":`Bearer ${cleanKey}` },
       body: JSON.stringify({
         model: "gpt-oss-120b",
-        max_completion_tokens: 3500,
+        max_completion_tokens: 6000,
         temperature: 0.3,
         response_format: { type: "json_object" },
         messages: [{ role:"user", content: prompt }]
@@ -338,7 +338,7 @@ async function callOpenRouter(model, prompt, key, timeoutMs) {
 // reasoning + answer (we allow 5,000 for completion). So keep INPUT small —
 // ~2,600 tokens — which is roughly 2-3 games per chunk.
 function chunkForCerebras(blocks) {
-  const BUDGET = 2000;
+  const BUDGET = 1400;
   const overhead = estTokens(INSTRUCTIONS_HEAD) + estTokens(INSTRUCTIONS_TAIL) + 50;
   const chunks = [];
   let cur = [], curTok = overhead;
@@ -515,12 +515,15 @@ export default async function handler(req, res) {
         const r = await callCerebras(buildPrompt(chunks[i]), CEREBRAS_KEY);
         if (r.ok) { collected.push(...r.candidates); chunkDone = true; break; }
         lastMsg = r.msg;
-        // If a single chunk is still too big, split it further (rare).
+        // If a multi-game chunk is too big, split it and reprocess.
         if (r.kind === "toobig" && chunks[i].length > 1) {
           const mid = Math.ceil(chunks[i].length/2);
           chunks.splice(i, 1, chunks[i].slice(0,mid), chunks[i].slice(mid));
           i--; chunkDone = true; break; // reprocess from the new smaller chunk
         }
+        // A SINGLE-game chunk that still truncates can't be split further — skip
+        // it and keep going so the rest of the slate still produces a board.
+        if (r.kind === "toobig" && chunks[i].length === 1) { chunkDone = true; break; }
         // Rate-limited: back off and retry this same chunk (don't abandon).
         if (r.kind === "rate" && attempt < 3 && timeLeft() > 14000) {
           await sleep(2500 * attempt); continue;
@@ -530,7 +533,9 @@ export default async function handler(req, res) {
         }
         break;
       }
-      if (!chunkDone) { cerebrasOk = false; break; }
+      // Never hard-abort the whole Cerebras pass on one bad chunk — continue so
+      // partial results from other chunks still surface.
+      if (!chunkDone) continue;
     }
 
     // Return whatever we collected, even if some chunks failed or were capped —
