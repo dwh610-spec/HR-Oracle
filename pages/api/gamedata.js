@@ -189,7 +189,7 @@ async function fetchStatcastBoard(hand, type = "batter") {
   try {
     const handParam = hand ? `&pitcher_hand=${hand}` : "";
     const url = `https://baseballsavant.mlb.com/leaderboard/statcast?type=${type}&year=${year}&position=&team=&min=q${handParam}&csv=true`;
-    const r = await fetchT(url, 12000, { headers: { "User-Agent": "Mozilla/5.0" } });
+    const r = await fetchT(url, 7000, { headers: { "User-Agent": "Mozilla/5.0" } });
     const text = await r.text();
     const lines = text.split("\n").filter(l => l.trim());
     if (lines.length > 1) {
@@ -249,7 +249,7 @@ async function _legacyGetSavantUnused() {
   const players = {};
   try {
     const url = `https://baseballsavant.mlb.com/leaderboard/statcast?type=batter&year=${year}&position=&team=&min=q&csv=true`;
-    const r = await fetchT(url, 12000, { headers: { "User-Agent": "Mozilla/5.0" } });
+    const r = await fetchT(url, 7000, { headers: { "User-Agent": "Mozilla/5.0" } });
     const text = await r.text();
     const lines = text.split("\n").filter(l => l.trim());
     if (lines.length > 1) {
@@ -308,7 +308,7 @@ async function getArsenals() {
     const out = {}; // name -> { FB:{usage,rv,slg,n}, BRK:{...}, OFF:{...} }
     try {
       const url = `https://baseballsavant.mlb.com/leaderboard/pitch-arsenal-stats?type=${type}&pitchType=&year=${year}&team=&min=10&csv=true`;
-      const r = await fetchT(url, 12000, { headers:{ "User-Agent":"Mozilla/5.0" } });
+      const r = await fetchT(url, 7000, { headers:{ "User-Agent":"Mozilla/5.0" } });
       const text = await r.text();
       const lines = text.split("\n").filter(l=>l.trim());
       if (lines.length < 2) return out;
@@ -481,9 +481,19 @@ export default async function handler(req, res) {
       results.lineups.home = h.map((p,i)=>({...p,lineup_spot:i+1}));
     }
 
-    // Savant + pitch arsenals (inlined — no internal API call)
-    const [savant, arsenals, savantSplits, pitcherContact] = await Promise.all([getSavant(), getArsenals(), getSavantSplits(), getPitcherContact()]);
-    if (Object.keys(savant).length) results.savantUsed = true;
+    // Savant + pitch arsenals. These are SUPPLEMENTAL — wrap each so a slow or
+    // failed Savant CSV can never sink the core MLB data (lineups/stats) for the
+    // game. Settle individually; any that miss just degrade gracefully to {}.
+    const safe = (p) => p.then(v => v).catch(() => null);
+    const [savant, arsenals, savantSplits, pitcherContact] = await Promise.all([
+      safe(getSavant()), safe(getArsenals()), safe(getSavantSplits()), safe(getPitcherContact())
+    ]).then(([sv, ar, sp, pc]) => [
+      sv || {},
+      ar || { pitcher:{}, batter:{} },
+      sp || { R:{}, L:{} },
+      pc || {}
+    ]);
+    if (savant && Object.keys(savant).length) results.savantUsed = true;
     if (arsenals.pitcher && Object.keys(arsenals.pitcher).length) results.arsenalUsed = true;
 
     // Resolve each starter's throwing hand AND name up front — batters need the
