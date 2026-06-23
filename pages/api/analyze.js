@@ -86,6 +86,9 @@ function gameBlock(game, gameData) {
       s += ` L21: ERA${p.recent_era} HR/9 ${p.recent_hr9||"?"} BAA${p.recent_baa||"?"} (${p.recent_hr||0}HR/${p.recent_ip||"?"}ip)`;
     s += ` | season ERA${p.era||sp.era} HR/9 ${p.hr9||"?"}`;
     if (p.fb_pct!=null) s += ` FB%${p.fb_pct}`;
+    // Contact allowed — the quality-of-contact evidence behind the grade.
+    if (p.barrel_allowed!=null) s += ` Brl%-allowed${p.barrel_allowed}`;
+    if (p.hardhit_allowed!=null) s += ` HH%-allowed${p.hardhit_allowed}`;
     s += arsStr(ars);
     return s;
   };
@@ -107,7 +110,7 @@ Return ONLY the 12 STRONGEST home-run candidates across the ENTIRE slate (not pe
 
 SCORING PRIORITY — THE OPPOSING PITCHER IS THE #1 FACTOR, ABOVE BATTER POWER:
 
-(1) OPPOSING PITCHER HR-VULNERABILITY is the single most important input. Every batter line begins with [vsP:GRADE] — the HR-vulnerability of the pitcher THAT hitter faces — and each starter shows [HR-VULN: GRADE]. The grades mean:
+(1) OPPOSING PITCHER HR-VULNERABILITY is the single most important input. Every batter line begins with [vsP:GRADE] — the HR-vulnerability of the pitcher THAT hitter faces — and each starter shows [HR-VULN: GRADE]. The grade already folds in HR/9 AND the quality of contact the pitcher allows (Brl%-allowed / HH%-allowed shown on the SP line) — high barrel-allowed means HRs are coming even if HR/9 hasn't caught up yet, so trust the grade over raw HR/9. The grades mean:
    • MEATBALL / VULNERABLE → pitcher gives up HRs easily. These lineups are where HRs happen. Rank their hitters HIGH.
    • NEUTRAL → average.
    • TOUGH / ELITE → very hard to homer off (e.g. Skenes, Yoshinobu, Cristopher Sánchez on form). DRAMATICALLY DOWNGRADE every hitter facing them, even elite sluggers.
