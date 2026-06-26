@@ -253,7 +253,11 @@ function HROracleInner() {
             const aLen = (gameData?.lineups?.away||[]).length;
             const hLen = (gameData?.lineups?.home||[]).length;
             if ((!gameData.lineupsPosted && !gameData.projected) || aLen < 3 || hLen < 3) {
-              setPendingGames(prev => [...prev, { ...g, reason: "no usable lineup/roster" }]);
+              // Specific reason so we can diagnose why a game dropped out.
+              const why = (!g.away_team_id || !g.home_team_id) ? "missing team id"
+                : (aLen < 3 || hLen < 3) ? `thin lineup (a:${aLen}/h:${hLen}, proj:${!!gameData.projected})`
+                : "no posted/projected lineup";
+              setPendingGames(prev => [...prev, { ...g, reason: why }]);
             } else {
               ready.push({ game: g, gameData });
               setDoneGames(prev => [...prev, g.game_id]);
