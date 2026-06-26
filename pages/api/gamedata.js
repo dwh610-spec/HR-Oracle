@@ -3,6 +3,7 @@
 // recent 14-day form, day/night & handedness splits, elevation, power metrics
 
 const BASE = "https://statsapi.mlb.com/api/v1";
+const { getCachedSavant } = require("../../lib/savantfeeds");
 
 export const config = { maxDuration: 30 };
 
@@ -399,7 +400,9 @@ export default async function handler(req, res) {
         away_sp_id = src("away_sp_id"), home_sp_id = src("home_sp_id"),
         away_team_id = src("away_team_id"), home_team_id = src("home_team_id"),
         game_time = src("game_time");
-  const savantBundle = body.savant_bundle || null;
+  // Savant bundle is now read from the shared module cache (getCachedSavant),
+  // NOT shipped in the request body — the body version exceeded Vercel's ~4MB
+  // limit and caused most games to fail.
 
   try {
     const results = {
@@ -502,25 +505,18 @@ export default async function handler(req, res) {
       results.lineups.home = h.map((p,i)=>({...p,lineup_spot:i+1}));
     }
 
-    // Savant feeds: use the bundle passed in from /api/savant (fetched ONCE per
-    // slate). Fall back to per-game fetch only if no bundle was provided (legacy
-    // GET path), so this endpoint still works standalone.
+    // Savant feeds: read from the shared module cache (fetched once, coalesced
+    // across the concurrent game batch). No HTTP body transfer.
     let savant, arsenals, savantSplits, pitcherContact;
-    if (savantBundle) {
-      savant = savantBundle.savant || {};
-      arsenals = savantBundle.arsenals || { pitcher:{}, batter:{} };
-      savantSplits = savantBundle.splits || { R:{}, L:{} };
-      pitcherContact = savantBundle.pitcherContact || {};
-    } else {
-      const safe = (p) => p.then(v => v).catch(() => null);
-      [savant, arsenals, savantSplits, pitcherContact] = await Promise.all([
-        safe(getSavant()), safe(getArsenals()), safe(getSavantSplits()), safe(getPitcherContact())
-      ]).then(([sv, ar, sp, pc]) => [
-        sv || {},
-        ar || { pitcher:{}, batter:{} },
-        sp || { R:{}, L:{} },
-        pc || {}
-      ]);
+    try {
+      const bundle = await getCachedSavant();
+      savant = bundle.savant || {};
+      arsenals = bundle.arsenals || { pitcher:{}, batter:{} };
+      savantSplits = bundle.splits || { R:{}, L:{} };
+      pitcherContact = bundle.pitcherContact || {};
+    } catch {
+      savant = {}; arsenals = { pitcher:{}, batter:{} };
+      savantSplits = { R:{}, L:{} }; pitcherContact = {};
     }
     if (savant && Object.keys(savant).length) results.savantUsed = true;
     if (arsenals.pitcher && Object.keys(arsenals.pitcher).length) results.arsenalUsed = true;
