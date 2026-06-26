@@ -479,13 +479,23 @@ export default async function handler(req, res) {
       results.projected = true;
       async function activeHitters(teamId) {
         if (!teamId) return [];
-        try {
-          const r = await fetchT(`${BASE}/teams/${teamId}/roster/active`, 9000);
-          const d = await r.json();
-          return (d.roster||[])
-            .filter(e => !["P","SP","RP"].includes(e.position?.abbreviation||"") && !injuredIds.has(e.person?.id))
-            .map(e => ({ id:e.person?.id, name:e.person?.fullName||"?", position:e.position?.abbreviation||"", bats:"R" }));
-        } catch { return []; }
+        const pull = async (rosterType) => {
+          try {
+            const r = await fetchT(`${BASE}/teams/${teamId}/roster/${rosterType}`, 9000);
+            const d = await r.json();
+            return (d.roster||[])
+              .filter(e => !["P","SP","RP"].includes(e.position?.abbreviation||"") && !injuredIds.has(e.person?.id))
+              .map(e => ({ id:e.person?.id, name:e.person?.fullName||"?", position:e.position?.abbreviation||"", bats:"R" }));
+          } catch { return []; }
+        };
+        // Active roster first; if it comes back thin (API sometimes returns
+        // sparse rosters early in the day), fall back to the 40-man.
+        let hitters = await pull("active");
+        if (hitters.length < 8) {
+          const wide = await pull("40Man");
+          if (wide.length > hitters.length) hitters = wide;
+        }
+        return hitters;
       }
       const [a,h] = await Promise.all([activeHitters(away_team_id), activeHitters(home_team_id)]);
       results.lineups.away = a.map((p,i)=>({...p,lineup_spot:i+1}));
