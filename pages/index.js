@@ -216,14 +216,9 @@ function HROracleInner() {
       if (!fetchedGames.length) throw new Error("No games found for today");
       setGames(fetchedGames);
 
-      // Step 1.5: Fetch the Savant feed bundle ONCE for the whole slate, so each
-      // per-game call doesn't re-download it (the cause of cold-start timeouts).
-      setStatus("Loading Statcast data…");
-      let savantBundle = null;
-      try {
-        const svRes = await fetch("/api/savant");
-        savantBundle = await svRes.json();
-      } catch { savantBundle = null; } // degrade gracefully if Savant is down
+      // Savant is now cached server-side (shared module), so no upfront fetch
+      // and no bundle in the request body — that payload was exceeding Vercel's
+      // request size limit and failing most games.
 
       // Step 2: Gather live data for ALL games (parallel, lightly batched),
       // then make ONE analyze call for the whole slate.
@@ -244,7 +239,7 @@ function HROracleInner() {
                 game_pk: g.game_pk, away_team: g.away_team, home_team: g.home_team,
                 venue: g.venue, away_sp_id: g.away_sp.id||"", home_sp_id: g.home_sp.id||"",
                 away_team_id: g.away_team_id||"", home_team_id: g.home_team_id||"",
-                game_time: g.time_et||"", savant_bundle: savantBundle
+                game_time: g.time_et||""
               })
             });
             const gameData = await gdRes.json();
