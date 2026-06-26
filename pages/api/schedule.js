@@ -71,7 +71,7 @@ export default async function handler(req, res) {
         } catch { gameTime = "TBD"; }
 
         games.push({
-          game_id: `${away?.team?.abbreviation}_${home?.team?.abbreviation}`,
+          game_id: `${away?.team?.abbreviation}_${home?.team?.abbreviation}_${game.gamePk}`,
           game_pk: game.gamePk,
           away_team: away?.team?.abbreviation || "???",
           home_team: home?.team?.abbreviation || "???",
