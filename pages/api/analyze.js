@@ -106,7 +106,7 @@ ${fmt(homeList, aP.hr_vuln||"NEUTRAL")}`;
 
 const INSTRUCTIONS_HEAD = `You are an elite MLB home-run prediction model. Below are MLB games with lineups and stats. Identify the TOP HOME RUN CANDIDATES.
 
-Return ONLY the 12 STRONGEST home-run candidates across the ENTIRE slate (not per game) — the single best plays, ranked. Skip marginal names. Games tagged [PROJ] have projected (not confirmed) lineups — still consider them.
+Return the 1-2 STRONGEST home-run candidates FROM EACH GAME — every game should be represented by its best hitter (and a clear second if one stands out). Rank the whole list by hr_score. Skip a game's weaker hitters, but do NOT skip whole games. Games tagged [PROJ] have projected (not confirmed) lineups — still consider them.
 
 SCORING PRIORITY — THE OPPOSING PITCHER IS THE #1 FACTOR, ABOVE BATTER POWER:
 
@@ -114,7 +114,7 @@ SCORING PRIORITY — THE OPPOSING PITCHER IS THE #1 FACTOR, ABOVE BATTER POWER:
    • MEATBALL / VULNERABLE → pitcher gives up HRs easily. These lineups are where HRs happen. Rank their hitters HIGH.
    • NEUTRAL → average.
    • TOUGH / ELITE → very hard to homer off (e.g. Skenes, Yoshinobu, Cristopher Sánchez on form). DRAMATICALLY DOWNGRADE every hitter facing them, even elite sluggers.
-   HARD RULE: an AVERAGE power hitter facing a MEATBALL/VULNERABLE pitcher MUST outrank a GREAT power hitter facing an ELITE/TOUGH pitcher. Do not put star sluggers in the top 12 just because of their season HR total if they face an ELITE/TOUGH arm — bump them down hard. The best plays each day should cluster in the games with the most hittable pitching.
+   HARD RULE: an AVERAGE power hitter facing a MEATBALL/VULNERABLE pitcher MUST outrank a GREAT power hitter facing an ELITE/TOUGH pitcher. Do not rank star sluggers highly just because of their season HR total if they face an ELITE/TOUGH arm — bump them down hard. The highest scores each day should belong to hitters in the games with the most hittable pitching.
 
 (2) RECENT PITCHING COLLAPSE & weak bullpen — a starter with high RECENT (L21) ERA/HR-9/BAA, or an opposing staff with high L14 HR/9, means HRs cluster across the WHOLE lineup; boost even non-stars there. Weight RECENT pitching far above season numbers.
 
@@ -441,8 +441,7 @@ export default async function handler(req, res) {
       .filter(c => { const k=normName(c.name)+"|"+(c.team||""); if(seen.has(k))return false; seen.add(k); return true; })
       .map(c => ({ ...c, hr_score: Math.round((parseFloat(c.hr_score)||0)*10)/10, projected: projFor(c) }))
       .sort((a,b) => b.hr_score - a.hr_score)
-      .slice(0, 15);   // hard slate-wide cap — keeps per-chunk Cerebras runs from
-                       // flooding the board with 10+ players per team.
+      .slice(0, 32);   // room for 1-2 per game across a full ~15-game slate.
 
     // Diagnostic: if we end up empty, say WHY so the UI shows something useful
     // instead of a bare "no candidates". rawN = objects AI returned; namedN =
