@@ -153,7 +153,23 @@ function Modal({ b, onClose }) {
 
 function GameView({ games, batters }) {
   const [sel, setSel] = useState(games[0]||null);
-  const gb = sel ? batters.filter(b=>b.team===sel.away_team||b.team===sel.home_team).sort((a,b)=>b.hr_score-a.hr_score) : [];
+  // Match a candidate's team to the selected game, tolerant of abbreviation
+  // variants (the AI may return CHW for CWS, AZ for ARI, etc.). Normalize both
+  // sides through an alias map before comparing.
+  const teamAlias = (t) => {
+    const x = (t||"").toUpperCase().trim();
+    const map = {
+      CWS:"CWS", CHW:"CWS", SOX:"CWS",
+      ARI:"AZ", AZ:"AZ",
+      SD:"SD", SDP:"SD", KC:"KC", KCR:"KC", SF:"SF", SFG:"SF",
+      TB:"TB", TBR:"TB", WSH:"WSH", WAS:"WSH", WSN:"WSH",
+      CHC:"CHC", CUBS:"CHC", NYY:"NYY", NYM:"NYM", LAD:"LAD", LAA:"LAA"
+    };
+    return map[x] || x;
+  };
+  const gb = sel ? batters
+    .filter(b => teamAlias(b.team)===teamAlias(sel.away_team) || teamAlias(b.team)===teamAlias(sel.home_team))
+    .sort((a,b)=>b.hr_score-a.hr_score) : [];
   return (
     <div>
       <div style={{ display:"flex", gap:6, flexWrap:"wrap", marginBottom:16 }}>
@@ -184,7 +200,14 @@ function GameView({ games, batters }) {
         </div>
       )}
       {gb.map((b,i)=><Row key={b.name+i} rank={i+1} b={b}/>)}
-      {sel && !gb.length && <div style={{ color:"#475569", textAlign:"center", padding:24, fontSize:13 }}>No data loaded for this game yet.</div>}
+      {sel && !gb.length && (() => {
+        const pend = pendingGames.find(p => p.game_id === sel.game_id);
+        const inErr = doneGames.includes(sel.game_id);
+        const msg = pend ? `Lineup not available — ${pend.reason}`
+          : inErr ? "This game loaded, but no batter here ranked among the day's top plays."
+          : "This game had no standout HR candidate today.";
+        return <div style={{ color:"#475569", textAlign:"center", padding:24, fontSize:13 }}>{msg}</div>;
+      })()}
     </div>
   );
 }
