@@ -154,8 +154,7 @@ function Modal({ b, onClose }) {
 function GameView({ games, batters }) {
   const [sel, setSel] = useState(games[0]||null);
   // Match a candidate's team to the selected game, tolerant of abbreviation
-  // variants (the AI may return CHW for CWS, AZ for ARI, etc.). Normalize both
-  // sides through an alias map before comparing.
+  // variants (the AI may return CHW for CWS, AZ for ARI, etc.).
   const teamAlias = (t) => {
     const x = (t||"").toUpperCase().trim();
     const map = {
@@ -163,12 +162,22 @@ function GameView({ games, batters }) {
       ARI:"AZ", AZ:"AZ",
       SD:"SD", SDP:"SD", KC:"KC", KCR:"KC", SF:"SF", SFG:"SF",
       TB:"TB", TBR:"TB", WSH:"WSH", WAS:"WSH", WSN:"WSH",
-      CHC:"CHC", CUBS:"CHC", NYY:"NYY", NYM:"NYM", LAD:"LAD", LAA:"LAA"
+      CHC:"CHC", CUBS:"CHC", NYY:"NYY", NYM:"NYM", LAD:"LAD", LAA:"LAA",
+      ATH:"ATH", OAK:"ATH", ANA:"LAA"
     };
     return map[x] || x;
   };
+  // True if two team codes refer to the same team: exact alias match, OR one is
+  // a prefix of the other (handles AZ/ARI, SD/SDP, WSH/WSN that slip the map).
+  const teamMatch = (a, b) => {
+    const x = teamAlias(a), y = teamAlias(b);
+    if (!x || !y) return false;
+    if (x === y) return true;
+    const s = x.length <= y.length ? x : y, l = x.length <= y.length ? y : x;
+    return s.length >= 2 && l.startsWith(s);
+  };
   const gb = sel ? batters
-    .filter(b => teamAlias(b.team)===teamAlias(sel.away_team) || teamAlias(b.team)===teamAlias(sel.home_team))
+    .filter(b => teamMatch(b.team, sel.away_team) || teamMatch(b.team, sel.home_team))
     .sort((a,b)=>b.hr_score-a.hr_score) : [];
   return (
     <div>
