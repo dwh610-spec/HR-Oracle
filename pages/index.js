@@ -151,7 +151,7 @@ function Modal({ b, onClose }) {
   );
 }
 
-function GameView({ games, batters }) {
+function GameView({ games, batters, pendingGames = [], doneGames = [] }) {
   const [sel, setSel] = useState(games[0]||null);
   // Match a candidate's team to the selected game, tolerant of abbreviation
   // variants (the AI may return CHW for CWS, AZ for ARI, etc.).
@@ -456,7 +456,7 @@ function HROracleInner() {
                   </div>
                 </>
               )}
-              {tab===1 && <GameView games={games} batters={batters}/>}
+              {tab===1 && <GameView games={games} batters={batters} pendingGames={pendingGames} doneGames={doneGames}/>}
             </>
           )}
 
