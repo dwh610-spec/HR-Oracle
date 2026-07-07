@@ -93,14 +93,23 @@ function gameBlock(game, gameData) {
     return s;
   };
 
+  // Team offensive HEAT: this lineup's own last-7-day form. Hot lineups cluster
+  // HRs across the whole order, so it boosts every hitter on that side.
+  const heatA = gameData?.teamHeat?.away || {};
+  const heatH = gameData?.teamHeat?.home || {};
+  const heatStr = (h) => {
+    if (!h || h.ops==null || h.ops==="N/A") return "";
+    return ` | TeamHeat L7: OPS${h.ops} ISO${h.iso} HR/G${h.hr_per_g}`;
+  };
+
   const envStr = (gameData?.hrEnv!=null) ? ` HR-ENV ${gameData.hrEnv}x` : "";
   return `=== ${game.away_team}@${game.home_team} @${game.venue} ${slot} elev${elevation}${envStr}${isProjected?" [PROJ]":""}
 ${spLine("ASP", game.away_sp, aP, arsA)}
 ${spLine("HSP", game.home_sp, hP, arsH)}
 Wx:${weather.summary||"?"}${weather.wind_effect?` [${weather.wind_effect}]`:""}
-AWAY(vs ${game.home_sp.throws}HP${staffStr(oppA)}):
+AWAY(vs ${game.home_sp.throws}HP${staffStr(oppA)}${heatStr(heatA)}):
 ${fmt(awayList, hP.hr_vuln||"NEUTRAL")}
-HOME(vs ${game.away_sp.throws}HP${staffStr(oppH)}):
+HOME(vs ${game.away_sp.throws}HP${staffStr(oppH)}${heatStr(heatH)}):
 ${fmt(homeList, aP.hr_vuln||"NEUTRAL")}`;
 }
 
@@ -116,7 +125,7 @@ SCORING PRIORITY — THE OPPOSING PITCHER IS THE #1 FACTOR, ABOVE BATTER POWER:
    • TOUGH / ELITE → very hard to homer off (e.g. Skenes, Yoshinobu, Cristopher Sánchez on form). DRAMATICALLY DOWNGRADE every hitter facing them, even elite sluggers.
    HARD RULE: an AVERAGE power hitter facing a MEATBALL/VULNERABLE pitcher MUST outrank a GREAT power hitter facing an ELITE/TOUGH pitcher. Do not rank star sluggers highly just because of their season HR total if they face an ELITE/TOUGH arm — bump them down hard. The highest scores each day should belong to hitters in the games with the most hittable pitching.
 
-(2) RECENT PITCHING COLLAPSE & weak bullpen — a starter with high RECENT (L21) ERA/HR-9/BAA, or an opposing staff with high L14 HR/9, means HRs cluster across the WHOLE lineup; boost even non-stars there. Weight RECENT pitching far above season numbers.
+(2) RECENT PITCHING COLLAPSE & weak bullpen — a starter with high RECENT (L21) ERA/HR-9/BAA, or an opposing staff with high L14 HR/9, means HRs cluster across the WHOLE lineup; boost even non-stars there. Weight RECENT pitching far above season numbers. TEAM HEAT works the same way from the offense side: each lineup header shows its own last-7-day form (TeamHeat L7 OPS/ISO/HR-per-game). A scorching lineup (OPS .800+, HR/G 1.5+) clusters HRs up and down the order — give every hitter in it a modest boost; an ice-cold lineup (OPS under .650) gets a drag. A hot lineup facing a collapsing staff is the single best cluster setup on a slate.
 
 (3) PITCH-TYPE MATCHUP (PITCHMIX) — a hitter who SLUGS HIGH (.550+) vs a pitch family the starter throws a lot AND gets hit on (P.rv positive) is a prime pick even with modest season HRs.
 
@@ -418,9 +427,16 @@ export default async function handler(req, res) {
       const byLast = clean.filter(c => validLast.has(normName(c.name).split(" ").pop()));
       if (byLast.length > kept.length) kept = byLast;
     }
-    // Tier 3: if we STILL have nothing but the AI clearly returned players,
-    // trust the AI rather than show an empty board (better partial than blank).
-    if (!kept.length && clean.length) kept = clean;
+    // Tier 3: if matching stripped MOST of what the AI returned (not just all of
+    // it — e.g. 30 came back and 1 survived), the allow-list is the thing that's
+    // wrong, not the AI. Trust the AI's list rather than show a 1-player board.
+    let filteredNote = "";
+    if (clean.length >= 6 && kept.length < Math.max(3, Math.floor(clean.length / 3))) {
+      filteredNote = ` (name-match kept ${kept.length}/${clean.length}; showing all)`;
+      kept = clean;
+    } else if (!kept.length && clean.length) {
+      kept = clean;
+    }
 
     // Resolve each candidate's projected status from ITS OWN game. Try exact
     // name|team, then any key matching the player's name (handles team-abbrev
@@ -454,7 +470,7 @@ export default async function handler(req, res) {
         : `${source} returned ${rawN} items but ${namedN} had names and 0 matched lineups`;
       return res.status(200).json({ candidates: [], source, reason });
     }
-    return res.status(200).json({ candidates: out, source });
+    return res.status(200).json({ candidates: out, source: source + filteredNote });
   };
 
   let lastMsg = "";
