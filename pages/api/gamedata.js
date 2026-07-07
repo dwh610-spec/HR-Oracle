@@ -505,19 +505,23 @@ export default async function handler(req, res) {
       results.lineups.home = h.map((p,i)=>({...p,lineup_spot:i+1}));
     }
 
-    // Savant feeds: read from the shared module cache (fetched once, coalesced
-    // across the concurrent game batch). No HTTP body transfer.
-    let savant, arsenals, savantSplits, pitcherContact;
+    // Savant feeds are SUPPLEMENTAL. Because Vercel doesn't share memory across
+    // concurrent function instances, the module cache may miss and trigger a
+    // full (slow) fetch. Race it against a short timeout: if Savant isn't ready
+    // fast, proceed WITHOUT it. Core MLB data (lineups/stats) always returns —
+    // this is what stops most-games-timing-out on a full slate.
+    let savant = {}, arsenals = { pitcher:{}, batter:{} },
+        savantSplits = { R:{}, L:{} }, pitcherContact = {};
     try {
-      const bundle = await getCachedSavant();
-      savant = bundle.savant || {};
-      arsenals = bundle.arsenals || { pitcher:{}, batter:{} };
-      savantSplits = bundle.splits || { R:{}, L:{} };
-      pitcherContact = bundle.pitcherContact || {};
-    } catch {
-      savant = {}; arsenals = { pitcher:{}, batter:{} };
-      savantSplits = { R:{}, L:{} }; pitcherContact = {};
-    }
+      const timeout = new Promise((resolve) => setTimeout(() => resolve(null), 6000));
+      const bundle = await Promise.race([getCachedSavant(), timeout]);
+      if (bundle) {
+        savant = bundle.savant || {};
+        arsenals = bundle.arsenals || { pitcher:{}, batter:{} };
+        savantSplits = bundle.splits || { R:{}, L:{} };
+        pitcherContact = bundle.pitcherContact || {};
+      }
+    } catch { /* proceed without Savant */ }
     if (savant && Object.keys(savant).length) results.savantUsed = true;
     if (arsenals.pitcher && Object.keys(arsenals.pitcher).length) results.arsenalUsed = true;
 
