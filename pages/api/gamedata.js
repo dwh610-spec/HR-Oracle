@@ -407,7 +407,7 @@ export default async function handler(req, res) {
   try {
     const results = {
       lineups: {}, pitcherStats: {}, weather: null, injured: [],
-      lineupsPosted: false, projected: false, gameState: "", oppStaff: {},
+      lineupsPosted: false, projected: false, gameState: "", oppStaff: {}, teamHeat: {},
       elevation: VENUE_ELEV[Object.keys(VENUE_ELEV).find(k => venue && venue.toLowerCase().includes(k.toLowerCase()))] || 20,
       isNightGame: false, savantUsed: false
     };
@@ -768,11 +768,39 @@ export default async function handler(req, res) {
       } catch {}
       return o;
     }
-    const [awayStaff, homeStaff] = await Promise.all([
-      teamStaff(away_team_id), teamStaff(home_team_id)
+    // TEAM OFFENSIVE HEAT: each team's last-7-day hitting. HRs cluster on team
+    // explosion days (a scorching lineup homers up and down the order — the
+    // Tolbert/Maile pattern), so a hot offense boosts EVERY hitter in it. One
+    // cheap MLB API call per team; no Savant dependency.
+    async function teamHeat(teamId) {
+      const o = {};
+      if (!teamId || teamId === "null") return o;
+      try {
+        const start = daysAgoISO(7), end = daysAgoISO(0);
+        const r = await fetchT(`${BASE}/teams/${teamId}/stats?stats=byDateRange&group=hitting&startDate=${start}&endDate=${end}&season=2026`, 9000);
+        const d = await r.json();
+        const s = d.stats?.[0]?.splits?.[0]?.stat;
+        if (s) {
+          o.ops = s.ops || "N/A";
+          o.iso = (s.slg!=null && s.avg!=null)
+            ? (parseFloat(s.slg) - parseFloat(s.avg)).toFixed(3) : "N/A";
+          o.hr = s.homeRuns ?? "N/A";
+          o.games = s.gamesPlayed ?? null;
+          o.hr_per_g = (s.homeRuns!=null && s.gamesPlayed)
+            ? (s.homeRuns / s.gamesPlayed).toFixed(2) : "N/A";
+        }
+      } catch {}
+      return o;
+    }
+
+    const [awayStaff, homeStaff, awayHeat, homeHeat] = await Promise.all([
+      teamStaff(away_team_id), teamStaff(home_team_id),
+      teamHeat(away_team_id), teamHeat(home_team_id)
     ]);
     // oppStaff[side] = the staff that side's hitters face.
     results.oppStaff = { away: homeStaff, home: awayStaff };
+    // teamHeat[side] = that side's OWN offensive form (boosts its own hitters).
+    results.teamHeat = { away: awayHeat, home: homeHeat };
 
     // Weather
     const coords = Object.entries(VENUE_COORDS).find(([k]) => venue && venue.toLowerCase().includes(k.toLowerCase()))?.[1] || [40.7128,-74.0060];
