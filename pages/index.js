@@ -252,6 +252,12 @@ function HROracleInner() {
       // and no bundle in the request body — that payload was exceeding Vercel's
       // request size limit and failing most games.
 
+      // Fire-and-forget: warm the server-side Savant cache once at the start.
+      // Games don't wait on this — each gamedata call races Savant against a 6s
+      // timeout and proceeds without it if not ready — but warming helps the
+      // later batches get the enrichment on shared/warm instances.
+      fetch("/api/savant").catch(() => {});
+
       // Step 2: Gather live data for ALL games (parallel, lightly batched),
       // then make ONE analyze call for the whole slate.
       setStatus(`Loading data for ${fetchedGames.length} games…`);
