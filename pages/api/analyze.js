@@ -496,62 +496,63 @@ export default async function handler(req, res) {
   }
 
   // ── Provider 2: OpenRouter (one fast free model, full slate in one call). ──
-  if (OPENROUTER_KEY && timeLeft() > 22000) {
+  // Tight timeout: if the shared free pool is busy it can hang rather than
+  // fail fast, which used to eat 20s that Cerebras badly needs as last resort.
+  if (OPENROUTER_KEY && timeLeft() > 20000) {
     const prompt = buildPrompt(blocks);
-    const r = await callOpenRouter("meta-llama/llama-3.3-70b-instruct:free", prompt, OPENROUTER_KEY, Math.min(20000, timeLeft() - 16000));
+    const r = await callOpenRouter("meta-llama/llama-3.3-70b-instruct:free", prompt, OPENROUTER_KEY, Math.min(10000, timeLeft() - 20000));
     if (r.ok) return finalize(r.candidates, "openrouter:llama-3.3-70b");
     lastMsg = r.msg;
   }
 
   // ── Provider 3: Cerebras (last resort). Tiny 8k context forces chunking, so
   // it can only cover part of a big slate — used only if the others all failed.
-  // Only attempt if we have real time left — its chunked calls are the slowest.
-  if (CEREBRAS_KEY && timeLeft() > 18000) {
+  // Whatever time is left at this point is ALL Cerebras gets, so we optimize for
+  // BREADTH (covering as many games as possible) over depth (heavy per-chunk
+  // retries) — a thin board across every game beats a full board on 3 games.
+  if (CEREBRAS_KEY && timeLeft() > 12000) {
     const allChunks = chunkForCerebras(blocks);
-    // Cap chunks by BOTH a hard limit and remaining time so we never overrun
-    // Vercel's function limit. The per-chunk time check below is the real guard;
-    // this cap is just a backstop.
-    const MAX_CHUNKS = 9;
+    // Chunks are now processed with minimal retry, so we can afford more of
+    // them; the per-chunk time check is the real guard, this is a backstop.
+    const MAX_CHUNKS = 16;
     const chunks = allChunks.slice(0, MAX_CHUNKS);
     const collected = [];
     let cerebrasOk = true;
 
     for (let i = 0; i < chunks.length; i++) {
-      if (timeLeft() < 12000) { cerebrasOk = false; break; } // bail with partial
-      // Space calls out: Cerebras free tier is ~1 request/second. Pausing
-      // before every chunk after the first keeps us under that limit.
-      if (i > 0) await sleep(1300);
+      // Reserve enough time to still return a response after the last chunk.
+      if (timeLeft() < 6000) { cerebrasOk = false; break; }
+      // Cerebras free tier is ~1 request/second — space calls out just enough.
+      if (i > 0) await sleep(1100);
 
       let chunkDone = false;
-      for (let attempt = 1; attempt <= 3; attempt++) {
+      for (let attempt = 1; attempt <= 2; attempt++) {
         const r = await callCerebras(buildPrompt(chunks[i]), CEREBRAS_KEY);
         if (r.ok) { collected.push(...r.candidates); chunkDone = true; break; }
         lastMsg = r.msg;
-        // If a multi-game chunk is too big, split it and reprocess.
+        // If a multi-game chunk is too big, split it and reprocess — this is a
+        // correctness fix, not a retry, so it's always worth doing.
         if (r.kind === "toobig" && chunks[i].length > 1) {
           const mid = Math.ceil(chunks[i].length/2);
           chunks.splice(i, 1, chunks[i].slice(0,mid), chunks[i].slice(mid));
           i--; chunkDone = true; break; // reprocess from the new smaller chunk
         }
-        // A SINGLE-game chunk that still truncates can't be split further — skip
-        // it and keep going so the rest of the slate still produces a board.
+        // A single-game chunk that still truncates can't be split further.
         if (r.kind === "toobig" && chunks[i].length === 1) { chunkDone = true; break; }
-        // Rate-limited: back off and retry this same chunk (don't abandon).
-        if (r.kind === "rate" && attempt < 3 && timeLeft() > 14000) {
-          await sleep(2500 * attempt); continue;
-        }
-        if (["busy","empty","unparseable","network"].includes(r.kind) && attempt < 3 && timeLeft() > 14000) {
-          await sleep(2500); continue;
+        // ONE quick retry only for rate-limit (common at ~1 req/sec); anything
+        // else, or a second failure, and we move on to preserve breadth.
+        if (r.kind === "rate" && attempt < 2 && timeLeft() > 8000) {
+          await sleep(1200); continue;
         }
         break;
       }
-      // Never hard-abort the whole Cerebras pass on one bad chunk — continue so
-      // partial results from other chunks still surface.
+      // Never hard-abort the whole pass on one bad chunk — keep going so the
+      // rest of the slate still gets covered.
       if (!chunkDone) continue;
     }
 
     // Return whatever we collected, even if some chunks failed or were capped —
-    // partial HR picks are far more useful than an error screen.
+    // partial HR picks spread across games are far more useful than an error.
     if (collected.length) return finalize(collected, cerebrasOk ? "cerebras" : "cerebras (partial)");
   }
 
