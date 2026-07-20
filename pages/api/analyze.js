@@ -158,6 +158,29 @@ function extractCandidates(rawText) {
   }
   if (!parsed) return null;
   if (Array.isArray(parsed)) return parsed;
+  if (Array.isArray(parsed.candidates) && parsed.candidates.some(c => c && c.name)) return parsed.candidates;
+  // Fallback: the model didn't use the expected {"candidates":[...]} shape.
+  // Search EVERY array anywhere in the response (top level + one level deep)
+  // and pick the one whose objects actually look like candidates (have a
+  // "name" field) — not just the first array encountered, which could be
+  // metadata, notes, or a key_stats list and would silently produce nameless
+  // junk (the "returned N items but 0 had names" failure).
+  const isCandidateArray = (v) => Array.isArray(v) && v.some(x => x && typeof x === "object" && "name" in x);
+  let best = null, bestScore = 0;
+  const consider = (v) => {
+    if (!isCandidateArray(v)) return;
+    const score = v.filter(x => x && x.name).length;
+    if (score > bestScore) { best = v; bestScore = score; }
+  };
+  for (const v of Object.values(parsed)) {
+    consider(v);
+    if (v && typeof v === "object" && !Array.isArray(v)) {
+      for (const v2 of Object.values(v)) consider(v2);
+    }
+  }
+  if (best) return best;
+  // Last resort: any array at all (old behavior), so callers can still try
+  // salvage/diagnostics rather than getting nothing.
   if (Array.isArray(parsed.candidates)) return parsed.candidates;
   const arr = Object.values(parsed).find(v=>Array.isArray(v));
   return arr || null;
