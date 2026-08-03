@@ -407,23 +407,9 @@ export default async function handler(req, res) {
   // Build allow-list + blocks. Track projected status PER PLAYER (keyed by their
   // own game), NOT slate-wide — otherwise one game lacking a posted lineup would
   // mark EVERY candidate (even in-progress games) as projected.
-  const validLower = new Set();
-  const blocks = [];
-  const projByPlayer = {}; // normalizedName|team -> true if that player's game is projected
-  for (const { game, gameData } of games) {
-    const a = (gameData?.lineups?.away || []).slice(0, 9);
-    const h = (gameData?.lineups?.home || []).slice(0, 9);
-    if (a.length < 3 || h.length < 3) continue;
-    const gameProjected = !!gameData?.projected;
-    [...a].forEach(p => { validLower.add((p.name||"").toLowerCase()); projByPlayer[`${(p.name||"").toLowerCase()}|${game.away_team}`] = gameProjected; });
-    [...h].forEach(p => { validLower.add((p.name||"").toLowerCase()); projByPlayer[`${(p.name||"").toLowerCase()}|${game.home_team}`] = gameProjected; });
-    blocks.push(gameBlock(game, gameData));
-  }
-  if (!blocks.length)
-    return res.status(200).json({ candidates: [], reason: "no usable lineups in any game" });
-
   // Normalize a name for matching: lowercase, strip a leading "#3 " lineup
-  // prefix, drop punctuation/accents, collapse spaces.
+  // prefix, drop punctuation/accents, collapse spaces. (Defined up here because
+  // the block loop below uses it to build the authoritative team map.)
   const normName = (s) => String(s||"")
     .toLowerCase()
     .replace(/^#?\d+\s+/, "")           // strip any leading lineup number
@@ -431,6 +417,38 @@ export default async function handler(req, res) {
     .replace(/[.\-']/g, "")
     .replace(/\s+/g, " ")
     .trim();
+
+  const validLower = new Set();
+  const blocks = [];
+  const projByPlayer = {}; // normalizedName|team -> true if that player's game is projected
+  // AUTHORITATIVE truth from the real lineups: each hitter's actual team and the
+  // pitcher they actually face. Used to OVERRIDE whatever team/matchup the AI
+  // writes — the data is the source of truth, never the model's assignment.
+  // This fixes "player shown on wrong team / wrong pitching matchup".
+  const truthByPlayer = {}; // normName -> { team, oppSP, oppSPThrows }
+  for (const { game, gameData } of games) {
+    const a = (gameData?.lineups?.away || []).slice(0, 9);
+    const h = (gameData?.lineups?.home || []).slice(0, 9);
+    if (a.length < 3 || h.length < 3) continue;
+    const gameProjected = !!gameData?.projected;
+    a.forEach(p => {
+      const nm = (p.name||"").toLowerCase();
+      validLower.add(nm);
+      projByPlayer[`${nm}|${game.away_team}`] = gameProjected;
+      // Away hitters face the HOME starter.
+      truthByPlayer[normName(p.name)] = { team: game.away_team, oppSP: game.home_sp?.name||"", oppSPThrows: game.home_sp?.throws||"" };
+    });
+    h.forEach(p => {
+      const nm = (p.name||"").toLowerCase();
+      validLower.add(nm);
+      projByPlayer[`${nm}|${game.home_team}`] = gameProjected;
+      // Home hitters face the AWAY starter.
+      truthByPlayer[normName(p.name)] = { team: game.home_team, oppSP: game.away_sp?.name||"", oppSPThrows: game.away_sp?.throws||"" };
+    });
+    blocks.push(gameBlock(game, gameData));
+  }
+  if (!blocks.length)
+    return res.status(200).json({ candidates: [], reason: "no usable lineups in any game" });
 
   // Build a normalized allow-set plus a last-name index for fuzzy fallback.
   const validNorm = new Set([...validLower].map(normName));
@@ -476,9 +494,32 @@ export default async function handler(req, res) {
       return false;
     };
 
+    // Correct each candidate's team + opposing pitcher from the AUTHORITATIVE
+    // lineup data, overriding whatever the AI wrote. Try exact normalized name,
+    // then last-name match. This is what fixes wrong-team / wrong-matchup bugs.
+    const truthFor = (c) => {
+      const n = normName(c.name);
+      if (truthByPlayer[n]) return truthByPlayer[n];
+      const last = n.split(" ").pop();
+      // Unique last-name fallback (only if exactly one player matches).
+      const hits = Object.entries(truthByPlayer).filter(([k]) => k.split(" ").pop() === last);
+      return hits.length === 1 ? hits[0][1] : null;
+    };
+
     const out = kept
+      .map(c => {
+        const t = truthFor(c);
+        const corrected = { ...c, hr_score: Math.round((parseFloat(c.hr_score)||0)*10)/10 };
+        if (t) {
+          // Data wins over the model's assignment.
+          if (t.team) corrected.team = t.team;
+          if (t.oppSP) corrected.opposing_sp = t.oppSP;
+          if (t.oppSPThrows) corrected.sp_throws = t.oppSPThrows;
+        }
+        corrected.projected = projFor(corrected);
+        return corrected;
+      })
       .filter(c => { const k=normName(c.name)+"|"+(c.team||""); if(seen.has(k))return false; seen.add(k); return true; })
-      .map(c => ({ ...c, hr_score: Math.round((parseFloat(c.hr_score)||0)*10)/10, projected: projFor(c) }))
       .sort((a,b) => b.hr_score - a.hr_score)
       .slice(0, 32);   // room for 1-2 per game across a full ~15-game slate.
 
